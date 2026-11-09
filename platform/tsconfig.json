@@ -3,7 +3,9 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "strict": true
+    "strict": true,
+    "jsx": "react-jsx"
   },
-  "include": ["apps"]
+  "include": ["apps"],
+  "exclude": ["apps/portal"]
 }

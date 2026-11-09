@@ -1,5 +1,23 @@
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
-  test: { include: ["apps/**/test/**/*.test.ts"] },
+  test: {
+    projects: [
+      {
+        test: {
+          name: "node",
+          include: ["apps/**/test/**/*.test.ts"],
+          environment: "node",
+        },
+      },
+      {
+        test: {
+          name: "portal",
+          include: ["apps/portal/src/**/*.test.tsx"],
+          environment: "jsdom",
+          setupFiles: ["apps/portal/src/test-setup.ts"],
+        },
+      },
+    ],
+  },
 });
