@@ -1,0 +1,30 @@
+services:
+  proxy:
+    image: caddy:2
+    networks:
+      - edge
+      - system
+    ports:
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+  portal:
+    image: enterprise-platform-portal
+    networks:
+      - system
+  control-plane:
+    image: enterprise-platform-control-plane
+    networks:
+      - system
+  system-db:
+    image: postgres:16
+    networks:
+      - system
+
+networks:
+  edge: {}
+  system: {}
+  test:
+    internal: true
+  prod:
+    internal: true
