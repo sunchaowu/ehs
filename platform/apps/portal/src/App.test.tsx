@@ -7,7 +7,9 @@ describe("portal shell", () => {
     render(<App />);
     expect(screen.getByTestId("platform/shell/root")).toBeInTheDocument();
     expect(screen.getByTestId("platform/shell/header")).toBeInTheDocument();
-    expect(screen.getByTestId("platform/shell/title")).toHaveTextContent("企业应用平台");
+    const title = screen.getByTestId("platform/shell/title");
+    expect(title).toHaveTextContent("企业应用平台");
+    expect(title.closest(".ant-layout-sider")).toHaveClass("ant-layout-sider-light");
     expect(screen.getByTestId("platform/shell/content")).toHaveTextContent("暂无可用菜单");
     expect(screen.queryByTestId("platform/shell/conversation")).toBeNull();
   });
