@@ -3,11 +3,13 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { createUser, disableUser, loginWithPassword, readSession, registerAccount } from "./accounts.js";
 import { openDatabase } from "./database.js";
 import { listSlots } from "./slots.js";
+import { completeWechatLogin, createWechatClient, startWechatLogin, type WechatClient } from "./wechat.js";
 
-export async function buildServer(options?: { databaseUrl?: string }): Promise<FastifyInstance> {
+export async function buildServer(options?: { databaseUrl?: string; wechatClient?: WechatClient }): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, trustProxy: true });
   await app.register(cookie);
   const databaseUrl = options?.databaseUrl ?? process.env.DATABASE_SYSTEM_URL;
+  const wechatClient = options?.wechatClient ?? createWechatClient();
   app.get("/health", async () => ({ status: "ok" }));
   app.get("/slots", async () => ({ slots: listSlots() }));
 
@@ -106,6 +108,45 @@ export async function buildServer(options?: { databaseUrl?: string }): Promise<F
       const params = request.params as { username: string };
       await disableUser(database, params.username);
       return reply.code(204).send();
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.post("/api/session/wechat/start", async (_request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const result = await startWechatLogin(database);
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return result;
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.get("/api/session/wechat/callback", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const query = request.query as { code?: string; state?: string };
+      const result = await completeWechatLogin(database, wechatClient, query.code, query.state);
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      reply.setCookie("platform_session", result.sessionId, {
+        httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+        secure: request.protocol === "https",
+      });
+      return { user: result.user };
     } finally {
       await database.close();
     }

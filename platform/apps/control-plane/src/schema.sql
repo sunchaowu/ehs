@@ -26,3 +26,8 @@ create table if not exists plugins (
   enabled boolean not null,
   updated_at timestamptz not null
 );
+
+create table if not exists wechat_states (
+  state text primary key,
+  expires_at timestamptz not null
+);
