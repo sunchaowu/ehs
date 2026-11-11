@@ -1,0 +1,60 @@
+.platform-auth {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: linear-gradient(120deg, #d6e4ff, #efdbff, #bae0ff, #b5f5ec, #ffe7ba);
+  background-size: 320% 320%;
+  animation: platform-auth-gradient 18s ease infinite;
+}
+
+.platform-auth .ant-card-head-title {
+  font-weight: 600;
+  background: linear-gradient(90deg, #1677ff, #722ed1, #13c2c2, #1677ff);
+  background-size: 220% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: platform-auth-title 8s linear infinite;
+}
+
+@keyframes platform-auth-gradient {
+  0% {
+    background-position: 0% 40%;
+  }
+  50% {
+    background-position: 100% 60%;
+  }
+  100% {
+    background-position: 0% 40%;
+  }
+}
+
+@keyframes platform-auth-title {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 100% 50%;
+  }
+}
+
+@media (max-width: 768px) {
+  .platform-auth {
+    padding: 16px;
+    box-sizing: border-box;
+  }
+
+  .platform-auth .ant-card {
+    width: 100% !important;
+    max-width: 420px;
+  }
+
+  .platform-project-layout {
+    flex-direction: column;
+  }
+
+  .platform-project-session {
+    width: 100% !important;
+  }
+}

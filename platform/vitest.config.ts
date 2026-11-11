@@ -8,6 +8,7 @@ export default defineConfig({
           name: "node",
           include: ["apps/**/test/**/*.test.ts"],
           environment: "node",
+          globalSetup: ["apps/control-plane/test/restore-admin.ts"],
           poolOptions: {
             forks: { singleFork: true },
           },

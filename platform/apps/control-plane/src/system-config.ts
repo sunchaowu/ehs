@@ -37,7 +37,7 @@ export function defaultSystemConfig(input: {
 }): SystemConfig {
   return {
     "platform.title": input.title,
-    "platform.languages": ["zh-CN"],
+    "platform.languages": ["zh-CN", "en-US"],
     "registration.enabled": true,
     "wechat.appId": "",
     "wechat.appSecret": "",

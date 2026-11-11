@@ -69,7 +69,20 @@ export async function openDatabase(databaseUrl: string): Promise<SystemDatabase>
       return restoreConfig(result.rows);
     },
     async close() {
-      await pool.end();
+      const ending = pool.end();
+      const timer = setTimeout(() => {
+        const clients = (pool as unknown as {
+          _clients?: Array<{ connection?: { stream?: { destroy(): void } } }>;
+        })._clients ?? [];
+        for (const client of clients) {
+          client.connection?.stream?.destroy();
+        }
+      }, 500);
+      try {
+        await ending;
+      } finally {
+        clearTimeout(timer);
+      }
     },
     query(text, values) {
       return pool.query(text, values);

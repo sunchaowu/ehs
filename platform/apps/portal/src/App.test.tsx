@@ -1,5 +1,5 @@
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 
 afterEach(() => {
@@ -29,6 +29,23 @@ describe("portal login", () => {
     expect(screen.getByTestId("platform/login/username")).toBeInTheDocument();
   });
 
+  it("opens the workbench after a successful login", async () => {
+    const user = { username: "admin", displayName: "管理员", language: "zh-CN", platformAdmin: true, wechatBound: false };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ user, title: "企业应用平台" }),
+      })),
+    );
+    render(<App session={null} wechatAvailable={false} />);
+    fireEvent.change(screen.getByTestId("platform/login/username"), { target: { value: "admin" } });
+    fireEvent.change(screen.getByTestId("platform/login/password"), { target: { value: "secret" } });
+    fireEvent.click(screen.getByTestId("platform/login/submit"));
+    expect(await screen.findByTestId("platform/shell/user")).toHaveTextContent("管理员");
+    vi.unstubAllGlobals();
+  });
+
   it("explains that registration is closed", () => {
     render(<App session={null} wechatAvailable={false} registrationEnabled={false} page="register" />);
     expect(screen.getByText("请联系管理员")).toBeInTheDocument();
@@ -50,12 +67,95 @@ describe("portal shell", () => {
     expect(screen.getByTestId("platform/shell/language")).toHaveTextContent("zh-CN");
   });
 
+  it("opens account actions and collapses the navigation to icons", async () => {
+    render(<App session={admin} title="企业应用平台" />);
+    fireEvent.click(screen.getByTestId("platform/shell/account"));
+    expect(await screen.findByTestId("platform/shell/account-settings")).toHaveTextContent("账号设置");
+    expect(screen.getByTestId("platform/shell/menu-system-config")).toHaveTextContent("系统配置");
+    expect(screen.getByTestId("platform/shell/logout")).toHaveTextContent("退出");
+    fireEvent.click(screen.getByTestId("platform/shell/nav-collapse"));
+    expect(screen.getByTestId("platform/shell/sider")).toHaveClass("ant-layout-sider-collapsed");
+  });
+
   it("tells a user without menus to contact an administrator", () => {
     render(<App session={employee} title="企业应用平台" />);
     expect(screen.queryByTestId("platform/shell/nav-system-config")).toBeNull();
     expect(screen.queryByTestId("platform/shell/nav-plugin-config")).toBeNull();
     expect(screen.queryByTestId("platform/shell/nav-model-config")).toBeNull();
     expect(screen.getByTestId("platform/shell/content")).toHaveTextContent("联系管理员");
+    expect(screen.queryByTestId("platform/project/new")).toBeNull();
+  });
+
+  it("opens a draft session after an administrator creates a project", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ project: { name: "请假审批", code: "qing-jia-shen-pi" } }),
+      })),
+    );
+    render(<App session={admin} title="企业应用平台" />);
+    fireEvent.click(screen.getByTestId("platform/project/new"));
+    fireEvent.change(screen.getByTestId("platform/project/name"), { target: { value: "请假审批" } });
+    fireEvent.click(screen.getByTestId("platform/project/save"));
+    expect(await screen.findByTestId("platform/project/draft")).toHaveTextContent("草稿");
+    expect(screen.getByTestId("platform/project/session")).toHaveStyle({ width: "400px" });
+    expect(screen.getByText("会话和运维智能体不会调用模型")).toBeInTheDocument();
+    expect(screen.getByTestId("platform/project/message")).toBeDisabled();
+    vi.unstubAllGlobals();
+  });
+
+  it("shows a node that has not reported healthy on the release check", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).endsWith("/release")) {
+          return { ok: true, json: async () => ({ published: false, nodes: [{ name: "prod-1", healthy: false, reason: "尚未报告" }] }) };
+        }
+        return { ok: true, json: async () => ({ project: { name: "请假审批", code: "qing-jia-shen-pi" } }) };
+      }),
+    );
+    render(<App session={admin} title="企业应用平台" />);
+    fireEvent.click(screen.getByTestId("platform/project/new"));
+    fireEvent.change(screen.getByTestId("platform/project/name"), { target: { value: "请假审批" } });
+    fireEvent.click(screen.getByTestId("platform/project/save"));
+    fireEvent.click(await screen.findByTestId("platform/project/release"));
+    expect(await screen.findByText("prod-1：尚未报告")).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+
+  it("shows the container group and design summary on the release check", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).endsWith("/release")) {
+          return {
+            ok: true,
+            json: async () => ({
+              published: false,
+              containerGroup: "leave",
+              otherProjects: [{ code: "leave", name: "请假" }],
+              designSummary: ["入库"],
+              candidateDigest: "sha256:abc",
+              testResult: { required: false },
+              nodes: [],
+            }),
+          };
+        }
+        return { ok: true, json: async () => ({ project: { name: "库存", code: "stock" } }) };
+      }),
+    );
+    render(<App session={admin} title="企业应用平台" />);
+    fireEvent.click(screen.getByTestId("platform/project/new"));
+    fireEvent.change(screen.getByTestId("platform/project/name"), { target: { value: "库存" } });
+    fireEvent.click(screen.getByTestId("platform/project/save"));
+    fireEvent.click(await screen.findByTestId("platform/project/release"));
+    const summary = await screen.findByTestId("platform/project/release-summary");
+    expect(summary).toHaveTextContent("容器组 leave");
+    expect(summary).toHaveTextContent("同组项目 请假");
+    expect(summary).toHaveTextContent("设计 入库");
+    expect(summary).toHaveTextContent("测试未设为发布门槛");
+    vi.unstubAllGlobals();
   });
 
   it("renders system, plugin, model, and personal settings", () => {

@@ -1,7 +1,24 @@
-import { Button, Form, Input, Layout, Typography } from "antd";
+import { HomeOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SettingOutlined, AppstoreOutlined, CloudOutlined } from "@ant-design/icons";
+import { Alert, Avatar, Button, Card, Checkbox, ConfigProvider, Drawer, Dropdown, Empty, Form, Input, Layout, List, Menu, Space, Spin, Tag, Typography } from "antd";
+import enUS from "antd/locale/en_US";
+import zhCN from "antd/locale/zh_CN";
 import { useEffect, useState } from "react";
+import "./auth-page.css";
+import { languageName, shellCopy } from "./shell-copy.js";
 
 const { Header, Sider, Content } = Layout;
+
+function useNarrowScreen() {
+  const [narrow, setNarrow] = useState(false);
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 768px)");
+    const update = () => setNarrow(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  return narrow;
+}
 
 export type SessionUser = {
   username: string;
@@ -38,12 +55,17 @@ export function App(props: {
   section?: Section;
   config?: SystemConfigView;
   plugins?: Array<{ id: string; name: string; enabled: boolean }>;
+  canCreateProject?: boolean;
+  modelConfigured?: boolean;
 }) {
   const provided = props.session !== undefined;
   const [session, setSession] = useState<SessionUser | null>(provided ? props.session ?? null : null);
   const [page, setPage] = useState<"login" | "register">(props.page ?? "login");
   const [reason, setReason] = useState(props.loginResult?.reason ?? "");
   const [title, setTitle] = useState(props.title ?? "企业应用平台");
+  const [canCreateProject, setCanCreateProject] = useState(props.canCreateProject ?? props.session?.platformAdmin === true);
+  const [modelConfigured, setModelConfigured] = useState(props.modelConfigured === true);
+  const [languages, setLanguages] = useState<string[]>(["zh-CN", "en-US"]);
 
   useEffect(() => {
     if (props.title) {
@@ -61,8 +83,19 @@ export function App(props: {
           setSession(null);
           return;
         }
-        const body = (await response.json()) as { user: SessionUser; title?: string };
+        const body = (await response.json()) as {
+          user: SessionUser;
+          title?: string;
+          canCreateProject?: boolean;
+          modelConfigured?: boolean;
+          languages?: string[];
+        };
         setSession(body.user);
+        setCanCreateProject(body.canCreateProject === true);
+        setModelConfigured(body.modelConfigured === true);
+        if (body.languages && body.languages.length > 0) {
+          setLanguages(body.languages);
+        }
         if (body.title) {
           setTitle(body.title);
         }
@@ -70,8 +103,9 @@ export function App(props: {
       .catch(() => setSession(null));
   }, [provided]);
 
-  if (!session) {
-    return page === "register" ? (
+  const locale = session?.language === "en-US" ? enUS : zhCN;
+  const screen = !session ? (
+    page === "register" ? (
       <RegisterPage enabled={props.registrationEnabled !== false} />
     ) : (
       <LoginPage
@@ -79,70 +113,202 @@ export function App(props: {
         reason={reason}
         onRegister={() => setPage("register")}
         onReason={setReason}
+        onLoggedIn={(user, nextTitle, nextCanCreate, nextModelConfigured, nextLanguages) => {
+          setSession(user);
+          setCanCreateProject(nextCanCreate);
+          setModelConfigured(nextModelConfigured);
+          if (nextLanguages && nextLanguages.length > 0) {
+            setLanguages(nextLanguages);
+          }
+          if (nextTitle) {
+            setTitle(nextTitle);
+          }
+        }}
       />
-    );
-  }
-
-  return (
+    )
+  ) : (
     <Workbench
       session={session}
       title={title}
       onTitle={setTitle}
+      onLanguage={(language) => setSession((current) => (current ? { ...current, language } : current))}
+      onLogout={() => setSession(null)}
+      languages={languages}
       initialSection={props.section ?? null}
       config={props.config}
       plugins={props.plugins}
+      canCreateProject={canCreateProject}
+      modelConfigured={modelConfigured}
     />
   );
+  return <ConfigProvider locale={locale}>{screen}</ConfigProvider>;
 }
 
 function Workbench(props: {
   session: SessionUser;
   title: string;
   onTitle: (title: string) => void;
+  onLanguage: (language: string) => void;
+  onLogout: () => void;
+  languages: string[];
   initialSection: Section | null;
   config?: SystemConfigView;
   plugins?: Array<{ id: string; name: string; enabled: boolean }>;
+  canCreateProject: boolean;
+  modelConfigured: boolean;
 }) {
+  const copy = shellCopy(props.session.language);
+  const narrow = useNarrowScreen();
   const [section, setSection] = useState<Section | null>(props.initialSection);
+  const [creating, setCreating] = useState(false);
+  const [project, setProject] = useState<{ name: string; code: string } | null>(null);
+  const [collapsed, setCollapsed] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   useEffect(() => {
     setSection(props.initialSection);
   }, [props.initialSection]);
+  const choose = (key: string) => {
+    setSection(key === "home" ? null : (key as Section));
+    setDrawerOpen(false);
+  };
+  const menuItems = [
+    { key: "home", icon: <HomeOutlined />, label: <span data-testid="platform/shell/nav-home">{copy.home}</span> },
+    ...(props.session.platformAdmin
+      ? [
+          { key: "system", icon: <SettingOutlined />, label: <span data-testid="platform/shell/nav-system-config">{copy.system}</span> },
+          { key: "plugin", icon: <AppstoreOutlined />, label: <span data-testid="platform/shell/nav-plugin-config">{copy.plugin}</span> },
+          { key: "model", icon: <CloudOutlined />, label: <span data-testid="platform/shell/nav-model-config">{copy.model}</span> },
+        ]
+      : []),
+  ];
+  const navigation = (
+    <Menu
+      mode="inline"
+      theme="light"
+      inlineCollapsed={!narrow && collapsed}
+      selectedKeys={[section ?? "home"]}
+      onClick={({ key }) => choose(key)}
+      items={menuItems}
+      style={{ borderInlineEnd: 0 }}
+    />
+  );
+  const editingTitle =
+    section === "system" ? copy.system : section === "plugin" ? copy.plugin : section === "model" ? copy.model : section === "account" ? copy.personal : project ? project.name : creating ? copy.projectName : copy.home;
+  const languageChoices = props.languages.includes(props.session.language) ? props.languages : [props.session.language, ...props.languages];
   return (
     <Layout data-testid="platform/shell/root" style={{ minHeight: "100vh" }}>
-      <Sider width={240} theme="light">
-        <Typography.Title level={4} data-testid="platform/shell/title">
-          {props.title}
-        </Typography.Title>
-        {props.session.platformAdmin ? (
-          <nav>
-            <button type="button" data-testid="platform/shell/nav-system-config" onClick={() => setSection("system")}>
-              系统配置
-            </button>
-            <button type="button" data-testid="platform/shell/nav-plugin-config" onClick={() => setSection("plugin")}>
-              插件配置
-            </button>
-            <button type="button" data-testid="platform/shell/nav-model-config" onClick={() => setSection("model")}>
-              模型配置
-            </button>
-          </nav>
-        ) : null}
-      </Sider>
+      {narrow ? (
+        <Drawer placement="left" width={240} open={drawerOpen} onClose={() => setDrawerOpen(false)} title={props.title}>
+          {navigation}
+        </Drawer>
+      ) : (
+        <Sider data-testid="platform/shell/sider" collapsed={collapsed} collapsedWidth={64} width={240} theme="light" trigger={null} style={{ background: "#fff", borderRight: "1px solid #f0f0f0" }}>
+          <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                height: 56,
+                paddingInline: collapsed ? 0 : 16,
+                justifyContent: collapsed ? "center" : "space-between",
+                borderBottom: "1px solid #f0f0f0",
+              }}
+            >
+              {collapsed ? null : (
+                <Typography.Title level={5} data-testid="platform/shell/title" style={{ margin: 0 }} ellipsis>
+                  {props.title}
+                </Typography.Title>
+              )}
+              <Button
+                type="text"
+                data-testid="platform/shell/nav-collapse"
+                icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+                onClick={() => setCollapsed((value) => !value)}
+              />
+            </div>
+            {navigation}
+          </div>
+        </Sider>
+      )}
       <Layout>
-        <Header data-testid="platform/shell/header" style={{ height: "56px", lineHeight: "56px", background: "#fff" }}>
-          <span data-testid="platform/shell/user">{props.session.displayName}</span>
-          <span data-testid="platform/shell/language">{props.session.language}</span>
-          <button type="button" data-testid="platform/shell/settings" onClick={() => setSection("account")}>
-            配置
-          </button>
+        <Header
+          data-testid="platform/shell/header"
+          style={{ height: "56px", lineHeight: "56px", background: "#fff", display: "flex", alignItems: "center", gap: 12, paddingInline: 16, borderBottom: "1px solid #f0f0f0" }}
+        >
+          {narrow ? (
+            <Button type="text" data-testid="platform/shell/nav-open" icon={<MenuUnfoldOutlined />} onClick={() => setDrawerOpen(true)} />
+          ) : null}
+          <Typography.Text ellipsis>{editingTitle}</Typography.Text>
+          <Dropdown
+            trigger={["click"]}
+            menu={{
+              triggerSubMenuAction: "click",
+              items: [
+                {
+                  key: "language",
+                  label: copy.language,
+                  children: languageChoices.map((code) => ({ key: `language:${code}`, label: languageName(code, props.session.language) })),
+                },
+                { key: "account", label: <span data-testid="platform/shell/account-settings">{copy.account}</span> },
+                ...(props.session.platformAdmin ? [{ key: "system", label: <span data-testid="platform/shell/menu-system-config">{copy.system}</span> }] : []),
+                { key: "logout", label: <span data-testid="platform/shell/logout">{copy.logout}</span> },
+              ],
+              onClick: ({ key }) => {
+                if (key.startsWith("language:")) {
+                  const language = key.slice("language:".length);
+                  void fetch("/api/account", {
+                    method: "PUT",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ displayName: props.session.displayName, language, password: "" }),
+                  }).then((response) => {
+                    if (response.ok) {
+                      props.onLanguage(language);
+                    }
+                  });
+                  return;
+                }
+                if (key === "account") {
+                  setSection("account");
+                }
+                if (key === "system") {
+                  setSection("system");
+                }
+                if (key === "logout") {
+                  void fetch("/api/session/logout", { method: "POST" }).finally(() => props.onLogout());
+                }
+              },
+            }}
+          >
+            <Button type="text" data-testid="platform/shell/account" style={{ marginLeft: "auto", height: 56 }}>
+              <Space size={8}>
+                <Avatar style={{ backgroundColor: "#1677ff" }}>{props.session.displayName.slice(0, 1)}</Avatar>
+                <span data-testid="platform/shell/user">{props.session.displayName}</span>
+                <Tag data-testid="platform/shell/language">{props.session.language}</Tag>
+              </Space>
+            </Button>
+          </Dropdown>
         </Header>
-        <Content data-testid="platform/shell/content">
+        <Content data-testid="platform/shell/content" style={{ padding: narrow ? 8 : 16, background: "#f5f5f5" }}>
+          <div style={{ background: "#fff", borderRadius: 8, minHeight: "calc(100vh - 88px)", padding: narrow ? 12 : 24 }}>
           {section === "system" && props.session.platformAdmin ? (
             <SystemConfigPage config={props.config} onTitle={props.onTitle} />
           ) : null}
           {section === "plugin" && props.session.platformAdmin ? <PluginPage plugins={props.plugins} /> : null}
           {section === "model" && props.session.platformAdmin ? <ModelPage config={props.config} /> : null}
           {section === "account" ? <AccountPage session={props.session} /> : null}
-          {section === null ? (props.session.platformAdmin ? "暂无可用菜单" : "联系管理员") : null}
+          {section === null && project ? (
+            <ProjectPage project={project} modelConfigured={props.modelConfigured} modelNotice={copy.modelUnavailable} />
+          ) : null}
+          {section === null && !project && creating ? <CreateProjectPage onCreated={setProject} /> : null}
+          {section === null && !project && !creating && props.canCreateProject ? (
+            <Card>
+              <Button type="primary" data-testid="platform/project/new" onClick={() => setCreating(true)}>
+                {copy.createProject}
+              </Button>
+            </Card>
+          ) : null}
+          {section === null && !project && !creating && !props.canCreateProject ? <Empty description={copy.contactAdmin} /> : null}
+          </div>
         </Content>
       </Layout>
     </Layout>
@@ -170,11 +336,13 @@ function SystemConfigPage(props: { config?: SystemConfigView; onTitle: (title: s
       .catch(() => setLoadError("系统配置读取失败"));
   }, [props.config]);
   if (!config) {
-    return <Typography.Paragraph>{loadError || "正在读取系统配置"}</Typography.Paragraph>;
+    return loadError ? <Alert type="error" showIcon message={loadError} /> : <Spin tip="正在读取系统配置" />;
   }
   const secretState = config.wechatSecretConfigured ? "已配置" : "未配置";
   return (
+    <Card title="系统配置">
     <Form
+      layout="vertical"
       initialValues={{
         title: config["platform.title"],
         languages: config["platform.languages"].join(","),
@@ -220,7 +388,7 @@ function SystemConfigPage(props: { config?: SystemConfigView; onTitle: (title: s
         <Input data-testid="platform/system-config/languages" />
       </Form.Item>
       <Form.Item name="registration" label="开放注册" valuePropName="checked">
-        <input type="checkbox" data-testid="platform/system-config/registration" />
+        <Checkbox data-testid="platform/system-config/registration" />
       </Form.Item>
       <Form.Item name="wechatAppId" label="微信 AppId">
         <Input data-testid="platform/system-config/wechat-app-id" />
@@ -228,7 +396,9 @@ function SystemConfigPage(props: { config?: SystemConfigView; onTitle: (title: s
       <Form.Item name="wechatSecret" label="微信 AppSecret">
         <Input.Password data-testid="platform/system-config/wechat-secret" />
       </Form.Item>
-      <span data-testid="platform/system-config/wechat-secret-state">{secretState}</span>
+      <Form.Item label="微信密钥">
+        <span data-testid="platform/system-config/wechat-secret-state">{secretState}</span>
+      </Form.Item>
       <Form.Item name="wechatRedirectUri" label="微信回调地址">
         <Input data-testid="platform/system-config/wechat-redirect" />
       </Form.Item>
@@ -245,6 +415,7 @@ function SystemConfigPage(props: { config?: SystemConfigView; onTitle: (title: s
         保存
       </Button>
     </Form>
+    </Card>
   );
 }
 
@@ -268,17 +439,16 @@ function PluginPage(props: { plugins?: Array<{ id: string; name: string; enabled
       .catch(() => setLoadError("插件读取失败"));
   }, [props.plugins]);
   if (!plugins) {
-    return <Typography.Paragraph>{loadError || "正在读取插件"}</Typography.Paragraph>;
-  }
-  if (plugins.length === 0) {
-    return <Typography.Paragraph data-testid="platform/plugin-config/empty">暂无插件</Typography.Paragraph>;
+    return loadError ? <Alert type="error" showIcon message={loadError} /> : <Spin tip="正在读取插件" />;
   }
   return (
-    <ul>
-      {plugins.map((plugin) => (
-        <li key={plugin.id}>{plugin.name}</li>
-      ))}
-    </ul>
+    <Card title="插件配置">
+      {plugins.length === 0 ? (
+        <Empty data-testid="platform/plugin-config/empty" description="暂无插件" />
+      ) : (
+        <List dataSource={plugins} renderItem={(plugin) => <List.Item>{plugin.name}</List.Item>} />
+      )}
+    </Card>
   );
 }
 
@@ -302,11 +472,13 @@ function ModelPage(props: { config?: SystemConfigView }) {
       .catch(() => setLoadError("模型配置读取失败"));
   }, [props.config]);
   if (!config) {
-    return <Typography.Paragraph>{loadError || "正在读取模型配置"}</Typography.Paragraph>;
+    return loadError ? <Alert type="error" showIcon message={loadError} /> : <Spin tip="正在读取模型配置" />;
   }
   const empty = !config["model.baseUrl"] && !config["model.name"] && !config.modelKeyConfigured;
   return (
+    <Card title="模型配置">
     <Form
+      layout="vertical"
       initialValues={{
         baseUrl: config["model.baseUrl"],
         name: config["model.name"],
@@ -328,7 +500,7 @@ function ModelPage(props: { config?: SystemConfigView }) {
         setConfig((await response.json()) as SystemConfigView);
       }}
     >
-      {empty ? <Typography.Paragraph data-testid="platform/model-config/empty">会话和运维智能体不会调用模型</Typography.Paragraph> : null}
+      {empty ? <Alert data-testid="platform/model-config/empty" type="warning" showIcon message="会话和运维智能体不会调用模型" /> : null}
       <Form.Item name="baseUrl" label="模型地址">
         <Input data-testid="platform/model-config/base-url" />
       </Form.Item>
@@ -338,17 +510,22 @@ function ModelPage(props: { config?: SystemConfigView }) {
       <Form.Item name="apiKey" label="模型密钥">
         <Input.Password data-testid="platform/model-config/api-key" />
       </Form.Item>
-      <span data-testid="platform/model-config/api-key-state">{config.modelKeyConfigured ? "已配置" : "未配置"}</span>
+      <Form.Item label="密钥状态">
+        <span data-testid="platform/model-config/api-key-state">{config.modelKeyConfigured ? "已配置" : "未配置"}</span>
+      </Form.Item>
       <Button htmlType="submit" type="primary" data-testid="platform/model-config/save">
         保存
       </Button>
     </Form>
+    </Card>
   );
 }
 
 function AccountPage(props: { session: SessionUser }) {
   return (
+    <Card title="个人配置">
     <Form
+      layout="vertical"
       initialValues={{ displayName: props.session.displayName, password: "", language: props.session.language }}
       onFinish={async (values: { displayName: string; password: string; language: string }) => {
         await fetch("/api/account", {
@@ -367,11 +544,14 @@ function AccountPage(props: { session: SessionUser }) {
       <Form.Item name="language" label="语言">
         <Input data-testid="platform/account/language" />
       </Form.Item>
-      <span data-testid="platform/account/wechat">{props.session.wechatBound ? "已绑定" : "未绑定"}</span>
+      <Form.Item label="微信">
+        <span data-testid="platform/account/wechat">{props.session.wechatBound ? "已绑定" : "未绑定"}</span>
+      </Form.Item>
       <Button htmlType="submit" type="primary" data-testid="platform/account/save">
         保存
       </Button>
     </Form>
+    </Card>
   );
 }
 
@@ -380,21 +560,35 @@ function LoginPage(props: {
   reason: string;
   onRegister: () => void;
   onReason: (reason: string) => void;
+  onLoggedIn: (user: SessionUser, title: string | undefined, canCreateProject: boolean, modelConfigured: boolean, languages?: string[]) => void;
 }) {
   return (
-    <main style={{ minHeight: "100vh", display: "grid", placeItems: "center" }}>
+    <main className="platform-auth">
+      <Card data-testid="platform/login/card" title="登录" style={{ width: 420 }}>
       <Form
-        data-testid="platform/login/card"
-        style={{ width: "420px" }}
+        layout="vertical"
         onFinish={async (values: { username: string; password: string }) => {
-          const response = await fetch("/api/session/login", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(values),
-          });
-          const body = (await response.json()) as { reason?: string };
-          if (!response.ok) {
-            props.onReason(body.reason ?? "用户名或密码错误");
+          try {
+            const response = await fetch("/api/session/login", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(values),
+            });
+            const body = (await response.json()) as {
+              reason?: string;
+              user?: SessionUser;
+              title?: string;
+              canCreateProject?: boolean;
+              modelConfigured?: boolean;
+              languages?: string[];
+            };
+            if (!response.ok || !body.user) {
+              props.onReason(body.reason ?? "用户名或密码错误");
+              return;
+            }
+            props.onLoggedIn(body.user, body.title, body.canCreateProject === true, body.modelConfigured === true, body.languages);
+          } catch (error) {
+            props.onReason(error instanceof Error ? error.message : "登录失败");
           }
         }}
       >
@@ -404,21 +598,26 @@ function LoginPage(props: {
         <Form.Item name="password">
           <Input.Password data-testid="platform/login/password" placeholder="密码" />
         </Form.Item>
-        {props.reason ? <Typography.Paragraph>{props.reason}</Typography.Paragraph> : null}
-        <Button data-testid="platform/login/submit" htmlType="submit" type="primary">
-          登录
-        </Button>
-        <Button data-testid="platform/login/register" onClick={props.onRegister}>
-          注册
-        </Button>
+        {props.reason ? <Alert type="error" showIcon message={props.reason} style={{ marginBottom: 16 }} /> : null}
+        <Space>
+          <Button data-testid="platform/login/submit" htmlType="submit" type="primary">
+            登录
+          </Button>
+          <Button data-testid="platform/login/register" htmlType="button" onClick={props.onRegister}>
+            注册
+          </Button>
+        </Space>
         {props.wechatAvailable ? (
-          <a data-testid="platform/login/wechat-qr" href="/api/session/wechat/start">
-            微信扫码登录
-          </a>
+          <div style={{ marginTop: 16 }}>
+            <a data-testid="platform/login/wechat-qr" href="/api/session/wechat/start">
+              微信扫码登录
+            </a>
+          </div>
         ) : (
-          <Typography.Paragraph data-testid="platform/login/wechat-unavailable">微信登录未配置</Typography.Paragraph>
+          <Alert data-testid="platform/login/wechat-unavailable" type="info" showIcon message="微信登录未配置" style={{ marginTop: 16 }} />
         )}
       </Form>
+      </Card>
     </main>
   );
 }
@@ -426,14 +625,17 @@ function LoginPage(props: {
 function RegisterPage(props: { enabled: boolean }) {
   if (!props.enabled) {
     return (
-      <main style={{ minHeight: "100vh", display: "grid", placeItems: "center" }}>
-        <Typography.Paragraph>请联系管理员</Typography.Paragraph>
+      <main className="platform-auth">
+        <Card style={{ width: 420 }}>
+          <Alert type="info" showIcon message="请联系管理员" />
+        </Card>
       </main>
     );
   }
   return (
-    <main style={{ minHeight: "100vh", display: "grid", placeItems: "center" }}>
-      <Form data-testid="platform/register/card" style={{ width: "420px" }}>
+    <main className="platform-auth">
+      <Card data-testid="platform/register/card" title="注册" style={{ width: 420 }}>
+      <Form layout="vertical">
         <Form.Item name="username">
           <Input data-testid="platform/register/username" placeholder="用户名" />
         </Form.Item>
@@ -447,6 +649,122 @@ function RegisterPage(props: { enabled: boolean }) {
           注册
         </Button>
       </Form>
+      </Card>
     </main>
+  );
+}
+
+function CreateProjectPage(props: { onCreated: (project: { name: string; code: string }) => void }) {
+  const [reason, setReason] = useState("");
+  return (
+    <Card title="创建项目">
+    <Form
+      data-testid="platform/project/form"
+      layout="vertical"
+      onFinish={async (values: { name: string; code?: string }) => {
+        const response = await fetch("/api/projects", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: values.name, code: values.code || undefined }),
+        });
+        const body = (await response.json()) as { reason?: string; project?: { name: string; code: string } };
+        if (!response.ok || !body.project) {
+          setReason(body.reason ?? "项目创建失败");
+          return;
+        }
+        props.onCreated(body.project);
+      }}
+    >
+      <Form.Item name="name" label="项目名称">
+        <Input data-testid="platform/project/name" />
+      </Form.Item>
+      <Form.Item name="code" label="项目编码">
+        <Input data-testid="platform/project/code" />
+      </Form.Item>
+      {reason ? <Alert type="error" showIcon message={reason} style={{ marginBottom: 16 }} /> : null}
+      <Button htmlType="submit" type="primary" data-testid="platform/project/save">
+        保存
+      </Button>
+    </Form>
+    </Card>
+  );
+}
+
+type ReleaseView = {
+  reason?: string;
+  published?: boolean;
+  nodes?: Array<{ name: string; healthy: boolean; reason?: string }>;
+  containerGroup?: string;
+  otherProjects?: Array<{ code: string; name: string }>;
+  designSummary?: string[];
+  candidateDigest?: string | null;
+  testResult?: { required?: boolean; passed?: boolean; failedCases?: string[] };
+};
+
+function ProjectPage(props: { project: { name: string; code: string }; modelConfigured: boolean; modelNotice: string }) {
+  const [reason, setReason] = useState("");
+  const [release, setRelease] = useState<ReleaseView | null>(null);
+  const waiting = (release?.nodes ?? []).filter((node) => !node.healthy).map((node) => `${node.name}：${node.reason ?? "尚未报告"}`);
+  return (
+    <div>
+      {props.modelConfigured ? null : <Alert type="warning" showIcon message={props.modelNotice} style={{ marginBottom: 16 }} />}
+      <div data-testid="platform/project/layout" className="platform-project-layout" style={{ display: "flex", gap: 16 }}>
+        <Card data-testid="platform/project/draft" title="草稿" style={{ flex: 1 }}>
+          <Typography.Title level={3}>{props.project.name}</Typography.Title>
+          <Button
+            data-testid="platform/project/release"
+            onClick={async () => {
+              const response = await fetch(`/api/projects/${props.project.code}/release`);
+              const body = (await response.json()) as ReleaseView;
+              if (!response.ok) {
+                setRelease({ reason: body.reason ?? "发布状态读取失败" });
+                return;
+              }
+              setRelease(body);
+            }}
+          >
+            发布确认
+          </Button>
+          {release ? (
+            <div data-testid="platform/project/release-summary" style={{ marginTop: 16 }}>
+              {release.reason ? <Alert type="error" showIcon message={release.reason} /> : null}
+              {release.published ? <Alert type="success" showIcon message="已发布" /> : null}
+              {release.containerGroup ? <Typography.Paragraph>容器组 {release.containerGroup}</Typography.Paragraph> : null}
+              {release.otherProjects && release.otherProjects.length > 0 ? (
+                <Typography.Paragraph>同组项目 {release.otherProjects.map((project) => project.name).join("、")}</Typography.Paragraph>
+              ) : null}
+              {release.designSummary && release.designSummary.length > 0 ? (
+                <Typography.Paragraph>设计 {release.designSummary.join("、")}</Typography.Paragraph>
+              ) : null}
+              {release.candidateDigest ? <Typography.Paragraph>镜像 {release.candidateDigest}</Typography.Paragraph> : null}
+              {release.testResult?.required === false ? <Typography.Paragraph>测试未设为发布门槛</Typography.Paragraph> : null}
+              {release.testResult?.passed === false ? <Typography.Paragraph>当前候选测试未全部通过</Typography.Paragraph> : null}
+              {waiting.length > 0 ? <Alert type="info" showIcon message={waiting.join("；")} /> : null}
+              {!release.published && waiting.length === 0 && !release.reason ? <Alert type="info" showIcon message="目标节点尚未报告健康" /> : null}
+            </div>
+          ) : null}
+        </Card>
+        <Card data-testid="platform/project/session" className="platform-project-session" title="会话" style={{ width: 400 }}>
+          <Form
+            onFinish={async (values: { body: string }) => {
+              const response = await fetch(`/api/projects/${props.project.code}/messages`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ body: values.body }),
+              });
+              if (!response.ok) {
+                const body = (await response.json()) as { reason?: string };
+                setReason(body.reason ?? "发送失败");
+              }
+            }}
+          >
+            <Form.Item name="body">
+              <Input data-testid="platform/project/message" disabled={!props.modelConfigured} />
+            </Form.Item>
+            {reason ? <Alert type="error" showIcon message={reason} /> : null}
+          </Form>
+        </Card>
+      </div>
+    </div>
   );
 }

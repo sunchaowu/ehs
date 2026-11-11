@@ -1,17 +1,33 @@
 import cookie from "@fastify/cookie";
 import Fastify, { type FastifyInstance } from "fastify";
 import { createUser, disableUser, loginWithPassword, readSession, registerAccount } from "./accounts.js";
+import { addMenu, applyTool, assignRole, cancelPublication, confirmPublication, confirmSolution, createProjectImage, effectiveActions, grantAccess, listRequirementMessages, postRequirementMessage, publishedMenus, readDraft, readProjectSource, readReleaseStatus } from "./drafts.js";
 import { openDatabase } from "./database.js";
+import { dockerImageBuilder, type ImageBuildInput } from "./images.js";
+import { opensslCertificateIssuer, type NodeCertificate } from "./node-install.js";
+import { assignNodePool, poolsOverlap, prepareNodeInstall, registerNode } from "./nodes.js";
+import { acceptHealthReport, readDesiredWork, type ReportedProject } from "./releases.js";
 import { hashPassword } from "./passwords.js";
+import { addProjectMember, canCreateProject, createProject, listProjects } from "./projects.js";
+import { listNotifications, provisionPostgresDatabase, type DatabaseProvisioner } from "./publish.js";
 import { listSlots } from "./slots.js";
 import { defaultSystemConfig, type SystemConfig } from "./system-config.js";
 import { completeWechatLogin, createWechatClient, startWechatLogin, type WechatClient } from "./wechat.js";
 
-export async function buildServer(options?: { databaseUrl?: string; wechatClient?: WechatClient }): Promise<FastifyInstance> {
+export async function buildServer(options?: {
+  databaseUrl?: string;
+  wechatClient?: WechatClient;
+  imageBuilder?: (input: ImageBuildInput) => Promise<{ digest: string } | { reason: string }>;
+  databaseProvisioner?: DatabaseProvisioner;
+  certificateIssuer?: (nodeName: string) => Promise<NodeCertificate | { reason: string }>;
+}): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, trustProxy: true });
   await app.register(cookie);
   const databaseUrl = options?.databaseUrl ?? process.env.DATABASE_SYSTEM_URL;
   const wechatClient = options?.wechatClient ?? createWechatClient();
+  const imageBuilder = options?.imageBuilder ?? dockerImageBuilder();
+  const databaseProvisioner = options?.databaseProvisioner ?? provisionPostgresDatabase;
+  const certificateIssuer = options?.certificateIssuer ?? opensslCertificateIssuer;
   app.get("/health", async () => ({ status: "ok" }));
   app.get("/slots", async () => ({ slots: listSlots() }));
 
@@ -27,13 +43,20 @@ export async function buildServer(options?: { databaseUrl?: string; wechatClient
         const status = result.reason === "账号已停用" ? 403 : 401;
         return reply.code(status).send({ reason: result.reason });
       }
+      const config = await database.readConfig();
       reply.setCookie("platform_session", result.sessionId, {
         httpOnly: true,
         sameSite: "lax",
         path: "/",
         secure: request.protocol === "https",
       });
-      return { user: result.user };
+      return {
+        user: result.user,
+        title: config["platform.title"],
+        canCreateProject: await canCreateProject(database, result.user),
+        modelConfigured: modelReady(config),
+        languages: config["platform.languages"],
+      };
     } finally {
       await database.close();
     }
@@ -50,7 +73,30 @@ export async function buildServer(options?: { databaseUrl?: string; wechatClient
         return reply.code(401).send({ reason: "未登录" });
       }
       const config = await database.readConfig();
-      return { user, title: config["platform.title"] };
+      return {
+        user,
+        title: config["platform.title"],
+        canCreateProject: await canCreateProject(database, user),
+        modelConfigured: modelReady(config),
+        languages: config["platform.languages"],
+      };
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.post("/api/session/logout", async (request, reply) => {
+    if (!databaseUrl) {
+      return reply.code(503).send({ reason: "系统库未配置" });
+    }
+    const database = await openDatabase(databaseUrl);
+    try {
+      const sessionId = request.cookies.platform_session;
+      if (sessionId) {
+        await database.query("delete from sessions where id = $1", [sessionId]);
+      }
+      reply.clearCookie("platform_session", { path: "/" });
+      return { loggedOut: true };
     } finally {
       await database.close();
     }
@@ -183,6 +229,9 @@ export async function buildServer(options?: { databaseUrl?: string; wechatClient
       }
       const current = await database.readConfig();
       const next = applyConfigPatch(current, request.body);
+      if (poolsOverlap(next["scheduler.defaultNodePool"], next["test.nodePool"])) {
+        return reply.code(400).send({ reason: "同一节点不能同时属于正式节点池和测试节点池" });
+      }
       await database.saveConfig(next);
       return publicConfig(next);
     } finally {
@@ -247,6 +296,488 @@ export async function buildServer(options?: { databaseUrl?: string; wechatClient
     }
   });
 
+  app.post("/api/projects", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const result = await createProject(database, actor, request.body as { name?: string; code?: string; containerGroup?: string });
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return reply.code(201).send(result);
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.get("/api/projects", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      return { projects: await listProjects(database, actor) };
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.get("/api/menus", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      return { menus: await publishedMenus(database, actor) };
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.post("/api/projects/:code/members", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const result = await addProjectMember(database, actor, (request.params as { code: string }).code, request.body as { username?: string; projectAdmin?: boolean });
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return reply.code(201).send(result);
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.post("/api/projects/:code/menus", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const result = await addMenu(database, actor, (request.params as { code: string }).code, request.body as { name?: string; parent?: string });
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return reply.code(201).send(result);
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.get("/api/projects/:code/draft", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const result = await readDraft(database, actor, (request.params as { code: string }).code);
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return result;
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.post("/api/projects/:code/grants", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const result = await grantAccess(
+        database,
+        actor,
+        (request.params as { code: string }).code,
+        request.body as { principalType?: string; principalName?: string; menu?: string; actions?: string[] },
+      );
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return reply.code(201).send(result);
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.post("/api/projects/:code/roles/assign", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const result = await assignRole(database, actor, (request.params as { code: string }).code, request.body as { role?: string; username?: string });
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return reply.code(201).send(result);
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.get("/api/projects/:code/access", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const query = request.query as { username?: string; menu?: string };
+      const actions = await effectiveActions(database, (request.params as { code: string }).code, query.username ?? "", query.menu ?? "");
+      return { actions };
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.post("/api/projects/:code/confirm", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const result = await confirmSolution(database, actor, (request.params as { code: string }).code);
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return reply.code(201).send(result);
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.get("/api/projects/:code/source", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const result = await readProjectSource(database, actor, (request.params as { code: string }).code);
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return result;
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.post("/api/projects/:code/image", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const result = await createProjectImage(database, actor, (request.params as { code: string }).code, imageBuilder);
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return reply.code(201).send(result);
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.post("/api/projects/:code/publish", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const result = await confirmPublication(database, actor, (request.params as { code: string }).code, databaseProvisioner);
+      if ("status" in result) {
+        const body = "failedCases" in result ? { reason: result.reason, failedCases: result.failedCases } : { reason: result.reason };
+        return reply.code(result.status).send(body);
+      }
+      return reply.code(202).send(result);
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.post("/api/nodes", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor?.platformAdmin) {
+        return reply.code(actor ? 403 : 401).send({ reason: actor ? "需要平台管理员" : "未登录" });
+      }
+      const body = request.body as { name?: string; zone?: string };
+      const result = await registerNode(database, body);
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return reply.code(201).send(result);
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.put("/api/nodes/:name/pool", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor?.platformAdmin) {
+        return reply.code(actor ? 403 : 401).send({ reason: actor ? "需要平台管理员" : "未登录" });
+      }
+      const result = await assignNodePool(database, (request.params as { name: string }).name, String((request.body as { pool?: string }).pool ?? ""));
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return result;
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.get("/api/nodes/:name/desired", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const result = await readDesiredWork(database, (request.params as { name: string }).name, request.headers.authorization ?? "");
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return result;
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.post("/api/nodes/:name/health", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const projects = (request.body as { projects?: ReportedProject[] })?.projects;
+      const result = await acceptHealthReport(
+        database,
+        (request.params as { name: string }).name,
+        request.headers.authorization ?? "",
+        Array.isArray(projects) ? projects : [],
+      );
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return result;
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.get("/api/projects/:code/release", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const result = await readReleaseStatus(database, actor, (request.params as { code: string }).code);
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return result;
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.get("/api/nodes/:name/install", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor?.platformAdmin) {
+        return reply.code(actor ? 403 : 401).send({ reason: actor ? "需要平台管理员" : "未登录" });
+      }
+      const host = request.hostname;
+      const result = await prepareNodeInstall(
+        database,
+        (request.params as { name: string }).name,
+        host ? `${request.protocol}://${host}` : "",
+        certificateIssuer,
+      );
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return reply.type("text/plain").send(result.script);
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.get("/api/notifications", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      return await listNotifications(database, actor.username);
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.post("/api/projects/:code/publish/cancel", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const result = await cancelPublication(database, actor, (request.params as { code: string }).code);
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return result;
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.post("/api/projects/:code/messages", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const result = await postRequirementMessage(database, actor, (request.params as { code: string }).code, String((request.body as { body?: string }).body ?? ""));
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return reply.code(201).send(result);
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.get("/api/projects/:code/messages", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const result = await listRequirementMessages(database, actor, (request.params as { code: string }).code);
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return result;
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.post("/api/projects/:code/tools", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const result = await applyTool(
+        database,
+        actor,
+        (request.params as { code: string }).code,
+        request.body as { name?: string; arguments?: Record<string, unknown> },
+      );
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return reply.code(201).send(result);
+    } finally {
+      await database.close();
+    }
+  });
+
   return app;
 }
 
@@ -286,6 +817,10 @@ function publicConfig(config: SystemConfig) {
     wechatSecretConfigured: config["wechat.appSecret"] !== "",
     modelKeyConfigured: config["model.apiKey"] !== "",
   };
+}
+
+function modelReady(config: SystemConfig): boolean {
+  return config["model.baseUrl"] !== "" && config["model.name"] !== "" && config["model.apiKey"] !== "";
 }
 
 async function requireDatabase(databaseUrl: string | undefined, reply: { code: (status: number) => { send: (body: unknown) => unknown } }) {

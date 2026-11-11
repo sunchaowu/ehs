@@ -11,7 +11,7 @@ describe("defaultSystemConfig", () => {
       registryAddress: "registry.internal",
     });
     expect(config["platform.title"]).toBe("企业应用平台");
-    expect(config["platform.languages"]).toEqual(["zh-CN"]);
+    expect(config["platform.languages"]).toEqual(["zh-CN", "en-US"]);
     expect(config["registration.enabled"]).toBe(true);
     expect(config["wechat.appId"]).toBe("");
     expect(config["wechat.appSecret"]).toBe("");
