@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { SystemDatabase } from "./database.js";
-import { verifyPassword } from "./passwords.js";
+import { hashPassword, verifyPassword } from "./passwords.js";
 
 export type PublicUser = {
   username: string;
@@ -72,4 +72,87 @@ export async function readSession(database: SystemDatabase, sessionId: string | 
     return undefined;
   }
   return toPublicUser(row);
+}
+
+type AccountInput = { username?: string; displayName?: string; password?: string };
+
+function validateAccount(input: AccountInput): { username: string; displayName: string; password: string } | { reason: string } {
+  const username = input.username?.trim() ?? "";
+  const displayName = input.displayName?.trim() ?? "";
+  const password = input.password ?? "";
+  if (!username || !displayName || !password) {
+    return { reason: "请输入用户名、显示名和密码" };
+  }
+  return { username, displayName, password };
+}
+
+async function insertUser(
+  database: SystemDatabase,
+  input: { username: string; displayName: string; password: string; platformAdmin: boolean },
+): Promise<{ id: string } | { reason: string }> {
+  const existing = await database.query("select id from users where username = $1", [input.username]);
+  if (existing.rows.length > 0) {
+    return { reason: "用户名已存在" };
+  }
+  const config = await database.readConfig();
+  const passwordHash = await hashPassword(input.password, {
+    memoryKiB: config["password.argon2.memoryKiB"],
+    iterations: config["password.argon2.iterations"],
+    parallelism: config["password.argon2.parallelism"],
+  });
+  const inserted = await database.query<{ id: string }>(
+    `insert into users (id, username, display_name, password_hash, disabled, language, wechat_open_id, platform_admin)
+     values (gen_random_uuid(), $1, $2, $3, false, 'zh-CN', null, $4)
+     returning id`,
+    [input.username, input.displayName, passwordHash, input.platformAdmin],
+  );
+  return { id: inserted.rows[0].id };
+}
+
+export async function registerAccount(
+  database: SystemDatabase,
+  input: AccountInput,
+): Promise<{ sessionId: string; user: PublicUser } | { reason: string; status: number }> {
+  const config = await database.readConfig();
+  if (!config["registration.enabled"]) {
+    return { reason: "请联系管理员", status: 403 };
+  }
+  const valid = validateAccount(input);
+  if ("reason" in valid) {
+    return { reason: valid.reason, status: 400 };
+  }
+  const created = await insertUser(database, { ...valid, platformAdmin: false });
+  if ("reason" in created) {
+    return { reason: created.reason, status: 409 };
+  }
+  return loginWithPassword(database, valid.username, valid.password).then((result) => {
+    if ("reason" in result) {
+      return { reason: result.reason, status: 401 };
+    }
+    return result;
+  });
+}
+
+export async function createUser(
+  database: SystemDatabase,
+  input: AccountInput,
+): Promise<{ user: PublicUser } | { reason: string; status: number }> {
+  const valid = validateAccount(input);
+  if ("reason" in valid) {
+    return { reason: valid.reason, status: 400 };
+  }
+  const created = await insertUser(database, { ...valid, platformAdmin: false });
+  if ("reason" in created) {
+    return { reason: created.reason, status: 409 };
+  }
+  const found = await database.query<UserRow>(
+    `select id, username, display_name, password_hash, disabled, language, wechat_open_id, platform_admin
+     from users where id = $1`,
+    [created.id],
+  );
+  return { user: toPublicUser(found.rows[0]) };
+}
+
+export async function disableUser(database: SystemDatabase, username: string): Promise<void> {
+  await database.query("update users set disabled = true where username = $1", [username]);
 }
