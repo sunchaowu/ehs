@@ -1,0 +1,26 @@
+import { describe, expect, it } from "vitest";
+import { openDatabase } from "../src/database.js";
+import { installInitialAdmin } from "../src/install-admin.js";
+
+describe("installInitialAdmin", () => {
+  it("prints a new password once and does not replace it", async () => {
+    const databaseUrl = process.env.DATABASE_SYSTEM_URL;
+    expect(databaseUrl, "缺少 DATABASE_SYSTEM_URL").toBeTruthy();
+    const database = await openDatabase(databaseUrl!);
+    await database.migrate();
+    await database.query("delete from sessions");
+    await database.query("delete from users where username = 'admin'");
+    await database.close();
+    const input = {
+      title: "企业应用平台",
+      prodAdminUrl: "postgres://platform@127.0.0.1:5432/prod",
+      testAdminUrl: "postgres://platform@127.0.0.1:5432/test",
+      registryAddress: "registry.internal",
+    };
+    const first = await installInitialAdmin(databaseUrl!, input);
+    const second = await installInitialAdmin(databaseUrl!, input);
+    expect(first).toMatchObject({ username: "admin", created: true });
+    expect(first.password).toHaveLength(24);
+    expect(second).toEqual({ username: "admin", password: "", created: false });
+  });
+});
