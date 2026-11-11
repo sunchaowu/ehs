@@ -8,6 +8,9 @@ export default defineConfig({
           name: "node",
           include: ["apps/**/test/**/*.test.ts"],
           environment: "node",
+          poolOptions: {
+            forks: { singleFork: true },
+          },
         },
       },
       {
