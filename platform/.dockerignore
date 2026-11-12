@@ -3,3 +3,4 @@ dist
 .git
 **/.env
 deploy/.env
+deploy/registry

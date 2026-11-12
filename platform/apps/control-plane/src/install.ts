@@ -19,6 +19,7 @@ const result = await installInitialAdmin(process.env.DATABASE_SYSTEM_URL!, {
   prodAdminUrl: process.env.DATABASE_PROD_ADMIN_URL!,
   testAdminUrl: process.env.DATABASE_TEST_ADMIN_URL!,
   registryAddress: process.env.REGISTRY_ADDRESS!,
+  reset: process.env.ADMIN_RESET === "1",
 });
 
 if (result.created) {

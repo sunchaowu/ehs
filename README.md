@@ -58,6 +58,8 @@ bash platform/scripts/deploy.sh
 ```
 
 - 脚本读取 `platform/deploy/.env`（部署主机、账号、系统库连接等），上传 `platform/` 后在 Ubuntu 上用 compose 启动系统库、安装初始管理员并构建全量服务。
+- compose 在系统运行区起五个服务：接入代理（Caddy 2）、门户、控制面、系统库、私有镜像库（`registry:2`，自签证书，宿主 `registry.internal:5000`）。控制面只挂载宿主机的 docker 客户端与 `/var/run/docker.sock`，用于生成器构建候选镜像。
+- 安装步骤先重建镜像再执行，保证系统库 schema 与代码同版本；`deploy/.env` 里的 `ADMIN_RESET=1` 会在每次发布时重置初始管理员密码并打印新密码，验证完成后改成 `0` 或删除该行。
 - 发布链路验证（compose、Caddy、节点安装脚本、镜像库）和依赖 GNU bash 的测试在 Ubuntu 环境完成。
 - 开发机本地只跑单元与门户测试；本地临时 PostgreSQL 即可跑控制面测试，不占用正式环境。
 
