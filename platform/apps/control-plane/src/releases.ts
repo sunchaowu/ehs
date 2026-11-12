@@ -3,6 +3,7 @@ import type { SystemDatabase } from "./database.js";
 import type { DesignDocument } from "./compiler.js";
 import { projectDatabaseName } from "./images.js";
 import { poolNames } from "./nodes.js";
+import { candidateTestVerdict } from "./test-gate.js";
 
 export type ReportedProject = {
   code?: string;
@@ -91,12 +92,17 @@ export async function readProjectRelease(database: SystemDatabase, projectCode: 
     [currentProject.id],
   ) : { rows: [] as Array<{ body: DesignDocument }> };
   const config = await database.readConfig();
-  const testResult = config["test.requirePassBeforePublish"] ? { passed: false, failedCases: [] as string[] } : { required: false };
+  const candidateDigest = candidate.rows[0]?.image_digest ?? null;
+  const testResult = config["test.requirePassBeforePublish"]
+    ? candidateDigest && currentProject
+      ? await candidateTestVerdict(database, currentProject.id, candidateDigest)
+      : { passed: false, failedCases: [] as string[] }
+    : { required: false };
   const summary = {
     containerGroup: currentProject?.container_group ?? "",
     otherProjects: others.rows,
     designSummary: design.rows[0]?.body.menus.map((menu) => menu.name) ?? [],
-    candidateDigest: candidate.rows[0]?.image_digest ?? null,
+    candidateDigest,
     testResult,
   };
   if (!current) {

@@ -4,6 +4,9 @@ import { latestCompiledSource, storeCompiledDesign } from "./designs.js";
 import { isProjectCode, suggestProjectCode } from "./project-code.js";
 import { buildProjectImage, latestImageDigest, publishProject, type DatabaseProvisioner, type ImageBuilder } from "./publish.js";
 import { cancelDesiredPublication, readProjectRelease } from "./releases.js";
+import { defaultTestExecutor, type TestExecutor } from "./test-executor.js";
+import { normalizeUserCase } from "./test-cases.js";
+import { replayTestRun, runProjectTests, type TestRunResult } from "./test-runs.js";
 
 const allowedActions = ["访问", "新增", "修改", "删除"];
 const fieldTypes = ["text", "longText", "number", "boolean", "date", "datetime", "user", "ref"];
@@ -325,7 +328,8 @@ export async function applyTool(
   actor: PublicUser,
   projectCode: string,
   call: { name?: string; arguments?: Record<string, unknown> },
-): Promise<{ recorded: true } | { reason: string; status: number }> {
+  executor: TestExecutor = defaultTestExecutor(),
+): Promise<{ recorded: true } | { reason: string; status: number } | TestRunResult> {
   const name = call.name ?? "";
   const args = call.arguments ?? {};
   if (name === "run_tests") {
@@ -341,10 +345,18 @@ export async function applyTool(
     if (!config["test.nodePool"].trim()) {
       return { reason: "测试节点池为空", status: 409 };
     }
-    return { reason: "在线测试尚未执行", status: 409 };
+    return runProjectTests(database, { id: project.id, code: projectCode }, executor);
   }
   if (name === "replay_test") {
-    return { reason: "没有这条测试记录", status: 404 };
+    const project = await managedProject(database, actor, projectCode);
+    if ("reason" in project) {
+      return project;
+    }
+    const recordId = stringArg(args.record);
+    if (!recordId) {
+      return { reason: "缺少测试记录", status: 400 };
+    }
+    return replayTestRun(database, { id: project.id, code: projectCode }, recordId, executor);
   }
   const project = await managedProject(database, actor, projectCode);
   if ("reason" in project) {
@@ -392,6 +404,12 @@ export async function applyTool(
     return { recorded: true };
   }
   if (name === "mark_extension" || name === "add_test_case") {
+    if (name === "add_test_case") {
+      const normalized = normalizeUserCase(args);
+      if ("reason" in normalized) {
+        return { reason: normalized.reason, status: 400 };
+      }
+    }
     await database.query("insert into draft_records (id, project_id, kind, body) values (gen_random_uuid(), $1, $2, $3::jsonb)", [
       project.id,
       name === "mark_extension" ? "extension" : "test_case",
@@ -424,7 +442,7 @@ async function ownSession(database: SystemDatabase, projectId: string, username:
   return created.rows[0].id;
 }
 
-async function managedProject(
+export async function managedProject(
   database: SystemDatabase,
   actor: PublicUser,
   projectCode: string,
@@ -443,7 +461,7 @@ async function managedProject(
   return { id: found.rows[0].id };
 }
 
-async function memberProject(
+export async function memberProject(
   database: SystemDatabase,
   actor: PublicUser,
   projectCode: string,

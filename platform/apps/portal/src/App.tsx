@@ -861,6 +861,211 @@ function CreateProjectPage(props: { onCreated: (project: { name: string; code: s
   );
 }
 
+type TestCaseView = {
+  origin: string;
+  method: string;
+  code: string;
+  name: string;
+};
+
+type TestRunView = {
+  id: string;
+  imageDigest: string;
+  status: string;
+  failure: string;
+  replayedFrom: string | null;
+  replayedFromDigest: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+  failedCases: string[];
+};
+
+type TestStepView = {
+  caseCode: string;
+  caseName: string;
+  stepIndex: number;
+  method: string;
+  startedAt: string;
+  expected: string;
+  actual: string;
+  passed: boolean;
+  reason: string;
+};
+
+type TestsView = {
+  candidateDigest: string | null;
+  cases: TestCaseView[];
+  runs: TestRunView[];
+};
+
+const methodLabel = (method: string) => (method === "black-box" ? "黑盒" : "白盒");
+const shortDigest = (digest: string) => digest.replace(/^sha256:/, "").slice(0, 12);
+const formatTime = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12: false });
+
+function TestResultsCard(props: { projectCode: string }) {
+  const [tests, setTests] = useState<TestsView | null>(null);
+  const [steps, setSteps] = useState<TestStepView[]>([]);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const loadSteps = async (runId: string) => {
+    try {
+      const response = await fetch(`/api/projects/${props.projectCode}/tests/runs/${runId}`);
+      const body = (await response.json()) as { steps?: TestStepView[] };
+      setSteps(response.ok && Array.isArray(body.steps) ? body.steps : []);
+    } catch {
+      setSteps([]);
+    }
+  };
+
+  const loadTests = async () => {
+    try {
+      const response = await fetch(`/api/projects/${props.projectCode}/tests`);
+      const body = (await response.json()) as Partial<TestsView> & { reason?: string };
+      if (!response.ok) {
+        setReason(body.reason ?? "测试结果读取失败");
+        return;
+      }
+      setReason("");
+      const view: TestsView = {
+        candidateDigest: body.candidateDigest ?? null,
+        cases: Array.isArray(body.cases) ? body.cases : [],
+        runs: Array.isArray(body.runs) ? body.runs : [],
+      };
+      setTests(view);
+      if (view.runs[0]) {
+        await loadSteps(view.runs[0].id);
+      } else {
+        setSteps([]);
+      }
+    } catch (error) {
+      setReason(error instanceof Error ? error.message : "测试结果读取失败");
+    }
+  };
+
+  const callAndReload = async (url: string) => {
+    setBusy(true);
+    try {
+      const response = await fetch(url, { method: "POST" });
+      const body = (await response.json()) as { reason?: string };
+      if (!response.ok) {
+        setReason(body.reason ?? "操作失败");
+      } else {
+        setReason("");
+      }
+      await loadTests();
+    } catch (error) {
+      setReason(error instanceof Error ? error.message : "操作失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadTests();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.projectCode]);
+
+  const latest = tests?.runs[0];
+  const latestSteps = latest ? steps : [];
+  const casesByCode = new Map((tests?.cases ?? []).map((testCase) => [testCase.code, testCase]));
+  const perCase = new Map<string, TestStepView[]>();
+  for (const step of latestSteps) {
+    const grouped = perCase.get(step.caseCode) ?? [];
+    grouped.push(step);
+    perCase.set(step.caseCode, grouped);
+  }
+  const caseRows = [...perCase.entries()].map(([code, caseSteps]) => {
+    const failedStep = caseSteps.find((step) => !step.passed);
+    const first = caseSteps[0];
+    const known = casesByCode.get(code);
+    return {
+      code,
+      name: known?.name ?? first?.caseName ?? code,
+      method: known?.method ?? first?.method ?? "",
+      passed: caseSteps.every((step) => step.passed),
+      startedAt: first ? first.startedAt : "",
+      failedStep: failedStep ? `第 ${failedStep.stepIndex} 步${failedStep.reason ? `：${failedStep.reason}` : ""}` : "",
+    };
+  });
+
+  return (
+    <Card data-testid="platform/test-results/card" title="测试结果" style={{ marginTop: 16 }}>
+      <Space wrap>
+        <Button
+          data-testid="platform/test-results/start"
+          type="primary"
+          loading={busy}
+          onClick={() => void callAndReload(`/api/projects/${props.projectCode}/tests`)}
+        >
+          运行测试
+        </Button>
+        <Button data-testid="platform/test-results/refresh" onClick={() => void loadTests()}>
+          刷新
+        </Button>
+        <Typography.Text type="secondary">{tests?.candidateDigest ? `候选镜像 ${shortDigest(tests.candidateDigest)}` : "还没有候选镜像"}</Typography.Text>
+      </Space>
+      {reason ? <Alert type="error" showIcon message={reason} style={{ marginTop: 12 }} /> : null}
+      {tests && tests.runs.length === 0 ? (
+        <Empty data-testid="platform/test-results/empty" style={{ marginTop: 16 }} description="还没有测试记录" />
+      ) : null}
+      {tests && tests.runs.length > 0 ? (
+        <List
+          data-testid="platform/test-results/runs"
+          style={{ marginTop: 12 }}
+          dataSource={tests.runs}
+          renderItem={(run) => (
+            <List.Item
+              data-testid={`platform/test-results/run-${run.id}`}
+              actions={[
+                <Button
+                  key="replay"
+                  data-testid={`platform/test-results/replay-${run.id}`}
+                  onClick={() => void callAndReload(`/api/projects/${props.projectCode}/tests/runs/${run.id}/replay`)}
+                >
+                  回放
+                </Button>,
+              ]}
+            >
+              <Space direction="vertical" size={0}>
+                <Space>
+                  <Tag color={run.status === "passed" ? "green" : run.status === "failed" ? "red" : "default"}>
+                    {run.status === "passed" ? "通过" : run.status === "failed" ? "失败" : "运行中"}
+                  </Tag>
+                  <Typography.Text>{formatTime(run.startedAt)}</Typography.Text>
+                  <Typography.Text type="secondary">候选 {shortDigest(run.imageDigest)}</Typography.Text>
+                  {run.replayedFrom ? <Typography.Text type="secondary">回放自镜像 {shortDigest(run.replayedFromDigest ?? "")}</Typography.Text> : null}
+                </Space>
+                {run.failure ? <Typography.Text type="danger">{run.failure}</Typography.Text> : null}
+                {run.failedCases.length > 0 ? <Typography.Text type="danger">失败案例 {run.failedCases.join("、")}</Typography.Text> : null}
+              </Space>
+            </List.Item>
+          )}
+        />
+      ) : null}
+      {caseRows.length > 0 ? (
+        <List
+          data-testid="platform/test-results/cases"
+          style={{ marginTop: 12 }}
+          header={<Typography.Text strong>最新一次运行的案例结果</Typography.Text>}
+          dataSource={caseRows}
+          renderItem={(row) => (
+            <List.Item data-testid={`platform/test-results/case-${row.code}`}>
+              <Space wrap>
+                <Tag>{methodLabel(row.method)}</Tag>
+                <Typography.Text>{row.name}</Typography.Text>
+                <Tag color={row.passed ? "green" : "red"}>{row.passed ? "通过" : "失败"}</Tag>
+                <Typography.Text type="secondary">{row.startedAt ? formatTime(row.startedAt) : ""}</Typography.Text>
+                {row.failedStep ? <Typography.Text type="danger">{row.failedStep}</Typography.Text> : null}
+              </Space>
+            </List.Item>
+          )}
+        />
+      ) : null}
+    </Card>
+  );
+}
+
 type ReleaseView = {
   reason?: string;
   published?: boolean;
@@ -910,6 +1115,9 @@ function ProjectPage(props: { project: { name: string; code: string }; modelConf
               {release.candidateDigest ? <Typography.Paragraph>镜像 {release.candidateDigest}</Typography.Paragraph> : null}
               {release.testResult?.required === false ? <Typography.Paragraph>测试未设为发布门槛</Typography.Paragraph> : null}
               {release.testResult?.passed === false ? <Typography.Paragraph>当前候选测试未全部通过</Typography.Paragraph> : null}
+              {release.testResult?.failedCases && release.testResult.failedCases.length > 0 ? (
+                <Typography.Paragraph data-testid="platform/project/failed-cases">失败案例 {release.testResult.failedCases.join("、")}</Typography.Paragraph>
+              ) : null}
               {waiting.length > 0 ? <Alert type="info" showIcon message={waiting.join("；")} /> : null}
               {!release.published && waiting.length === 0 && !release.reason ? <Alert type="info" showIcon message="目标节点尚未报告健康" /> : null}
             </div>
@@ -936,6 +1144,7 @@ function ProjectPage(props: { project: { name: string; code: string }; modelConf
           </Form>
         </Card>
       </div>
+      <TestResultsCard projectCode={props.project.code} />
     </div>
   );
 }

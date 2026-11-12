@@ -158,6 +158,83 @@ describe("portal shell", () => {
     vi.unstubAllGlobals();
   });
 
+  it("shows test results and replays a record", async () => {
+    const requests: Array<{ url: string; method?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: { method?: string }) => {
+        const target = String(url);
+        requests.push({ url: target, method: init?.method });
+        if (target.endsWith("/tests/runs/run-1/replay") && init?.method === "POST") {
+          return { ok: true, json: async () => ({ runId: "run-2", status: "passed" }) };
+        }
+        if (target.endsWith("/tests/runs/run-1")) {
+          return {
+            ok: true,
+            json: async () => ({
+              run: { id: "run-1" },
+              steps: [
+                {
+                  caseCode: "case-1",
+                  caseName: "新增请假单",
+                  stepIndex: 3,
+                  method: "black-box",
+                  startedAt: "2026-11-12T08:00:01.000Z",
+                  expected: "保存成功",
+                  actual: "保存失败",
+                  passed: false,
+                  reason: "提交后未看到成功提示",
+                },
+              ],
+            }),
+          };
+        }
+        if (target.endsWith("/tests")) {
+          return {
+            ok: true,
+            json: async () => ({
+              candidateDigest: "sha256:abcdef0123456789",
+              cases: [{ origin: "auto", method: "black-box", code: "case-1", name: "新增请假单" }],
+              runs: [
+                {
+                  id: "run-1",
+                  imageDigest: "sha256:abcdef0123456789",
+                  status: "failed",
+                  failure: "",
+                  replayedFrom: null,
+                  replayedFromDigest: null,
+                  startedAt: "2026-11-12T08:00:00.000Z",
+                  finishedAt: null,
+                  failedCases: ["新增请假单"],
+                },
+              ],
+            }),
+          };
+        }
+        if (target.endsWith("/release")) {
+          return {
+            ok: true,
+            json: async () => ({ published: false, nodes: [], candidateDigest: "sha256:abcdef0123456789", testResult: { passed: false, failedCases: ["新增请假单"] } }),
+          };
+        }
+        return { ok: true, json: async () => ({ project: { name: "请假审批", code: "leave" } }) };
+      }),
+    );
+    render(<App session={admin} title="企业应用平台" />);
+    fireEvent.click(screen.getByTestId("platform/project/new"));
+    fireEvent.change(screen.getByTestId("platform/project/name"), { target: { value: "请假审批" } });
+    fireEvent.click(screen.getByTestId("platform/project/save"));
+    expect(await screen.findByTestId("platform/test-results/card")).toBeInTheDocument();
+    expect(await screen.findByTestId("platform/test-results/case-case-1")).toHaveTextContent("新增请假单");
+    expect(screen.getByTestId("platform/test-results/case-case-1")).toHaveTextContent("失败");
+    expect(screen.getByTestId("platform/test-results/case-case-1")).toHaveTextContent("第 3 步");
+    fireEvent.click(screen.getByTestId("platform/test-results/replay-run-1"));
+    await vi.waitFor(() => {
+      expect(requests.some((request) => request.url.endsWith("/tests/runs/run-1/replay") && request.method === "POST")).toBe(true);
+    });
+    vi.unstubAllGlobals();
+  });
+
   it("renders system, plugin, model, and personal settings", () => {
     const config = {
       "platform.title": "企业应用平台",
