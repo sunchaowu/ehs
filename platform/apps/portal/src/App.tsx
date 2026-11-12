@@ -1,5 +1,5 @@
 import { HomeOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SettingOutlined, AppstoreOutlined, CloudOutlined } from "@ant-design/icons";
-import { Alert, Avatar, Button, Card, Checkbox, ConfigProvider, Drawer, Dropdown, Empty, Form, Input, Layout, List, Menu, Space, Spin, Tag, Typography } from "antd";
+import { Alert, Avatar, Button, Card, Checkbox, ConfigProvider, Drawer, Dropdown, Empty, Form, Input, InputNumber, Layout, List, Menu, Space, Spin, Switch, Tag, Typography } from "antd";
 import enUS from "antd/locale/en_US";
 import zhCN from "antd/locale/zh_CN";
 import { useEffect, useState } from "react";
@@ -45,6 +45,18 @@ export type SystemConfigView = {
 
 type Section = "system" | "plugin" | "model" | "account";
 
+export type PluginSummary = {
+  id: string;
+  title: string;
+  description: string;
+  available: boolean;
+  enabled: boolean;
+  status: "disabled" | "active" | "failed";
+  failure: string;
+  config: Record<string, string | number | boolean>;
+  configSchema: Array<{ key: string; label: string; type: "string" | "number" | "boolean"; required?: boolean }>;
+};
+
 export function App(props: {
   session?: SessionUser | null;
   wechatAvailable?: boolean;
@@ -54,7 +66,7 @@ export function App(props: {
   title?: string;
   section?: Section;
   config?: SystemConfigView;
-  plugins?: Array<{ id: string; name: string; enabled: boolean }>;
+  plugins?: PluginSummary[];
   canCreateProject?: boolean;
   modelConfigured?: boolean;
 }) {
@@ -153,7 +165,7 @@ function Workbench(props: {
   languages: string[];
   initialSection: Section | null;
   config?: SystemConfigView;
-  plugins?: Array<{ id: string; name: string; enabled: boolean }>;
+  plugins?: PluginSummary[];
   canCreateProject: boolean;
   modelConfigured: boolean;
 }) {
@@ -419,8 +431,8 @@ function SystemConfigPage(props: { config?: SystemConfigView; onTitle: (title: s
   );
 }
 
-function PluginPage(props: { plugins?: Array<{ id: string; name: string; enabled: boolean }> }) {
-  const [plugins, setPlugins] = useState(props.plugins);
+function PluginPage(props: { plugins?: PluginSummary[] }) {
+  const [plugins, setPlugins] = useState<PluginSummary[] | undefined>(props.plugins);
   const [loadError, setLoadError] = useState("");
   useEffect(() => {
     if (props.plugins) {
@@ -429,7 +441,7 @@ function PluginPage(props: { plugins?: Array<{ id: string; name: string; enabled
     }
     void fetch("/api/plugins")
       .then(async (response) => {
-        const body = (await response.json()) as { plugins?: Array<{ id: string; name: string; enabled: boolean }>; reason?: string };
+        const body = (await response.json()) as { plugins?: PluginSummary[]; reason?: string };
         if (!response.ok || !body.plugins) {
           setLoadError(body.reason ?? "插件读取失败");
           return;
@@ -441,13 +453,172 @@ function PluginPage(props: { plugins?: Array<{ id: string; name: string; enabled
   if (!plugins) {
     return loadError ? <Alert type="error" showIcon message={loadError} /> : <Spin tip="正在读取插件" />;
   }
+  const replace = (plugin: PluginSummary) => setPlugins((current) => (current ?? []).map((item) => (item.id === plugin.id ? plugin : item)));
   return (
     <Card title="插件配置">
       {plugins.length === 0 ? (
         <Empty data-testid="platform/plugin-config/empty" description="暂无插件" />
       ) : (
-        <List dataSource={plugins} renderItem={(plugin) => <List.Item>{plugin.name}</List.Item>} />
+        <List
+          dataSource={plugins}
+          renderItem={(plugin) => <PluginRow plugin={plugin} onUpdated={replace} />}
+        />
       )}
+    </Card>
+  );
+}
+
+const pluginStatusText: Record<PluginSummary["status"], string> = {
+  disabled: "已停用",
+  active: "运行中",
+  failed: "启动失败",
+};
+
+function PluginRow(props: { plugin: PluginSummary; onUpdated: (plugin: PluginSummary) => void }) {
+  const plugin = props.plugin;
+  const [switching, setSwitching] = useState(false);
+  const [configError, setConfigError] = useState("");
+  const [events, setEvents] = useState<Array<{ action: string; actor: string; result: string; detail: string; createdAt: string }> | null>(null);
+  const statusTag = (
+    <Tag
+      data-testid={`platform/plugin-config/${plugin.id}/status`}
+      color={plugin.status === "active" ? "green" : plugin.status === "failed" ? "red" : "default"}
+    >
+      {pluginStatusText[plugin.status]}
+    </Tag>
+  );
+  const toggle = async (enabled: boolean) => {
+    setSwitching(true);
+    setConfigError("");
+    try {
+      const response = await fetch(`/api/plugins/${plugin.id}/state`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      const body = (await response.json()) as { plugin?: PluginSummary; reason?: string };
+      if (!response.ok || !body.plugin) {
+        setConfigError(body.reason ?? "启停失败");
+        return;
+      }
+      props.onUpdated(body.plugin);
+    } catch {
+      setConfigError("启停失败");
+    } finally {
+      setSwitching(false);
+    }
+  };
+  const loadEvents = async () => {
+    if (events) {
+      setEvents(null);
+      return;
+    }
+    try {
+      const response = await fetch(`/api/plugins/${plugin.id}/events`);
+      const body = (await response.json()) as { events?: Array<{ action: string; actor: string; result: string; detail: string; createdAt: string }>; reason?: string };
+      setEvents(body.events ?? []);
+    } catch {
+      setEvents([]);
+    }
+  };
+  return (
+    <Card data-testid={`platform/plugin-config/row-${plugin.id}`} size="small" style={{ marginBottom: 12 }}>
+      <Space style={{ display: "flex", justifyContent: "space-between", width: "100%" }}>
+        <div>
+          <Space size={8}>
+            <strong>{plugin.title}</strong>
+            {statusTag}
+          </Space>
+          <div>
+            <Typography.Text type="secondary">{plugin.description}</Typography.Text>
+          </div>
+        </div>
+        <Switch
+          data-testid={`platform/plugin-config/${plugin.id}/switch`}
+          checked={plugin.enabled}
+          loading={switching}
+          disabled={!plugin.available}
+          onChange={(checked) => void toggle(checked)}
+        />
+      </Space>
+      {plugin.status === "failed" && plugin.failure ? (
+        <Alert
+          data-testid={`platform/plugin-config/${plugin.id}/failure`}
+          style={{ marginTop: 8 }}
+          type="error"
+          showIcon
+          message={plugin.failure}
+        />
+      ) : null}
+      {!plugin.available ? (
+        <Alert style={{ marginTop: 8 }} type="warning" showIcon message="插件定义不存在，无法运行" />
+      ) : null}
+      {plugin.available && plugin.configSchema.length > 0 ? (
+        <Form
+          layout="vertical"
+          style={{ marginTop: 12 }}
+          initialValues={plugin.config}
+          onFinish={async (values: Record<string, unknown>) => {
+            setConfigError("");
+            try {
+              const response = await fetch(`/api/plugins/${plugin.id}/config`, {
+                method: "PUT",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ config: values }),
+              });
+              const body = (await response.json()) as { plugin?: PluginSummary; reason?: string };
+              if (!response.ok || !body.plugin) {
+                setConfigError(body.reason ?? "配置保存失败");
+                return;
+              }
+              props.onUpdated(body.plugin);
+            } catch {
+              setConfigError("配置保存失败");
+            }
+          }}
+        >
+          {plugin.configSchema.map((field) => (
+            <Form.Item key={field.key} name={field.key} label={field.label} rules={field.required ? [{ required: true, message: `请填写${field.label}` }] : undefined}>
+              {field.type === "number" ? (
+                <InputNumber data-testid={`platform/plugin-config/${plugin.id}/config-${field.key}`} style={{ width: "100%" }} />
+              ) : field.type === "boolean" ? (
+                <Checkbox data-testid={`platform/plugin-config/${plugin.id}/config-${field.key}`} />
+              ) : (
+                <Input data-testid={`platform/plugin-config/${plugin.id}/config-${field.key}`} />
+              )}
+            </Form.Item>
+          ))}
+          {configError ? <Alert type="error" showIcon message={configError} style={{ marginBottom: 8 }} /> : null}
+          <Button htmlType="submit" data-testid={`platform/plugin-config/${plugin.id}/save`}>
+            保存配置
+          </Button>
+        </Form>
+      ) : configError ? (
+        <Alert type="error" showIcon message={configError} style={{ marginTop: 8 }} />
+      ) : null}
+      <div style={{ marginTop: 12 }}>
+        <Button size="small" data-testid={`platform/plugin-config/${plugin.id}/events-button`} onClick={() => void loadEvents()}>
+          {events ? "收起启停记录" : "启停记录"}
+        </Button>
+        {events ? (
+          <List
+            size="small"
+            style={{ marginTop: 8 }}
+            dataSource={events}
+            locale={{ emptyText: "暂无启停记录" }}
+            renderItem={(event, index) => (
+              <List.Item data-testid={`platform/plugin-config/${plugin.id}/event-${index}`}>
+                <Space size={8}>
+                  <Tag color={event.result === "ok" ? "green" : "red"}>{event.action}</Tag>
+                  <span>{event.actor}</span>
+                  <Typography.Text type="secondary">{new Date(event.createdAt).toLocaleString()}</Typography.Text>
+                  {event.detail ? <Typography.Text type="secondary">{event.detail}</Typography.Text> : null}
+                </Space>
+              </List.Item>
+            )}
+          />
+        ) : null}
+      </div>
     </Card>
   );
 }

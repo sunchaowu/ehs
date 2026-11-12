@@ -24,8 +24,26 @@ create table if not exists plugins (
   id text primary key,
   name text not null,
   enabled boolean not null,
+  status text not null default 'disabled',
+  failure text not null default '',
+  config jsonb not null default '{}',
   updated_at timestamptz not null
 );
+
+create table if not exists plugin_events (
+  id uuid primary key,
+  seq bigserial not null,
+  plugin_id text not null,
+  action text not null,
+  actor text not null,
+  result text not null,
+  detail text not null default '',
+  created_at timestamptz not null
+);
+
+alter table plugins add column if not exists status text not null default 'disabled';
+alter table plugins add column if not exists failure text not null default '';
+alter table plugins add column if not exists config jsonb not null default '{}';
 
 create table if not exists wechat_states (
   state text primary key,

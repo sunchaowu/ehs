@@ -187,4 +187,64 @@ describe("portal shell", () => {
     expect(screen.getByTestId("platform/account/display-name")).toHaveValue("管理员");
     expect(screen.getByTestId("platform/account/wechat")).toHaveTextContent("未绑定");
   });
+
+  it("shows plugin state, failure reason, and load toggles", async () => {
+    const notice = {
+      id: "portal-notice",
+      title: "门户公告",
+      description: "在门户显示平台公告",
+      available: true,
+      enabled: false,
+      status: "disabled" as const,
+      failure: "",
+      config: {},
+      configSchema: [{ key: "title", label: "公告标题", type: "string" as const, required: true }],
+    };
+    const broken = {
+      id: "broken-plugin",
+      title: "坏插件",
+      description: "启动会失败",
+      available: true,
+      enabled: true,
+      status: "failed" as const,
+      failure: "请填写公告标题",
+      config: {},
+      configSchema: [],
+    };
+    const requests: Array<{ url: string; body?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
+        requests.push({ url: String(url), body: init?.body });
+        if (String(url).endsWith("/state") && init?.method === "PUT") {
+          return { ok: true, json: async () => ({ plugin: { ...notice, enabled: true, status: "active" } }) };
+        }
+        if (String(url).endsWith("/events")) {
+          return {
+            ok: true,
+            json: async () => ({ events: [{ action: "enable", actor: "admin", result: "ok", detail: "", createdAt: "2026-11-12T04:00:00.000Z" }] }),
+          };
+        }
+        return { ok: true, json: async () => ({ plugins: [notice, broken] }) };
+      }),
+    );
+    render(<App session={admin} title="企业应用平台" section="plugin" plugins={[notice, broken]} />);
+    expect(screen.getByTestId("platform/plugin-config/portal-notice/status")).toHaveTextContent("已停用");
+    expect(screen.getByTestId("platform/plugin-config/broken-plugin/status")).toHaveTextContent("启动失败");
+    expect(screen.getByTestId("platform/plugin-config/broken-plugin/failure")).toHaveTextContent("请填写公告标题");
+    fireEvent.click(screen.getByTestId("platform/plugin-config/portal-notice/switch"));
+    expect(await screen.findByTestId("platform/plugin-config/portal-notice/status")).toHaveTextContent("运行中");
+    expect(requests.some((request) => request.url === "/api/plugins/portal-notice/state" && request.body === '{"enabled":true}')).toBe(true);
+    fireEvent.click(screen.getByTestId("platform/plugin-config/portal-notice/events-button"));
+    expect(await screen.findByTestId("platform/plugin-config/portal-notice/event-0")).toHaveTextContent("enable");
+    fireEvent.click(screen.getByTestId("platform/plugin-config/portal-notice/config-title"));
+    fireEvent.change(screen.getByTestId("platform/plugin-config/portal-notice/config-title"), { target: { value: "停机维护" } });
+    fireEvent.click(screen.getByTestId("platform/plugin-config/portal-notice/save"));
+    await vi.waitFor(() => {
+      expect(
+        requests.some((request) => request.url === "/api/plugins/portal-notice/config" && request.body?.includes("停机维护")),
+      ).toBe(true);
+    });
+    vi.unstubAllGlobals();
+  });
 });

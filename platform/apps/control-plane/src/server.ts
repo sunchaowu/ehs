@@ -6,10 +6,12 @@ import { openDatabase } from "./database.js";
 import { dockerImageBuilder, type ImageBuildInput } from "./images.js";
 import { opensslCertificateIssuer, type NodeCertificate } from "./node-install.js";
 import { assignNodePool, poolsOverlap, prepareNodeInstall, registerNode } from "./nodes.js";
+import { createPluginRuntime } from "./plugin-runtime.js";
 import { acceptHealthReport, readDesiredWork, type ReportedProject } from "./releases.js";
 import { hashPassword } from "./passwords.js";
 import { addProjectMember, canCreateProject, createProject, listProjects } from "./projects.js";
 import { listNotifications, provisionPostgresDatabase, type DatabaseProvisioner } from "./publish.js";
+import type { PluginRuntime } from "./plugin-runtime.js";
 import { listSlots } from "./slots.js";
 import { defaultSystemConfig, type SystemConfig } from "./system-config.js";
 import { completeWechatLogin, createWechatClient, startWechatLogin, type WechatClient } from "./wechat.js";
@@ -20,6 +22,7 @@ export async function buildServer(options?: {
   imageBuilder?: (input: ImageBuildInput) => Promise<{ digest: string } | { reason: string }>;
   databaseProvisioner?: DatabaseProvisioner;
   certificateIssuer?: (nodeName: string) => Promise<NodeCertificate | { reason: string }>;
+  pluginRuntime?: PluginRuntime;
 }): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, trustProxy: true });
   await app.register(cookie);
@@ -28,8 +31,24 @@ export async function buildServer(options?: {
   const imageBuilder = options?.imageBuilder ?? dockerImageBuilder();
   const databaseProvisioner = options?.databaseProvisioner ?? provisionPostgresDatabase;
   const certificateIssuer = options?.certificateIssuer ?? opensslCertificateIssuer;
+  const pluginRuntime = options?.pluginRuntime ?? createPluginRuntime();
   app.get("/health", async () => ({ status: "ok" }));
   app.get("/slots", async () => ({ slots: listSlots() }));
+  if (databaseUrl) {
+    try {
+      const database = await openDatabase(databaseUrl);
+      try {
+        await pluginRuntime.activateInstalled(database);
+      } finally {
+        await database.close();
+      }
+    } catch {
+      // 数据库尚未就绪时跳过启动恢复；插件行状态保持到下次重启。
+    }
+  }
+  app.addHook("onClose", async () => {
+    await pluginRuntime.disposeAll();
+  });
 
   app.post("/api/session/login", async (request, reply) => {
     if (!databaseUrl) {
@@ -249,10 +268,68 @@ export async function buildServer(options?: {
       if (!actor?.platformAdmin) {
         return reply.code(403).send({ reason: "需要平台管理员" });
       }
-      const result = await database.query<{ id: string; name: string; enabled: boolean }>(
-        "select id, name, enabled from plugins order by name",
-      );
-      return { plugins: result.rows };
+      return { plugins: await pluginRuntime.listPlugins(database) };
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.put("/api/plugins/:id/state", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor?.platformAdmin) {
+        return reply.code(403).send({ reason: "需要平台管理员" });
+      }
+      const body = request.body as { enabled?: boolean };
+      if (typeof body.enabled !== "boolean") {
+        return reply.code(400).send({ reason: "请提供启停状态" });
+      }
+      const outcome = await pluginRuntime.setState(database, (request.params as { id: string }).id, body.enabled, actor.username);
+      if (!outcome.ok) {
+        return reply.code(outcome.status).send({ reason: outcome.reason });
+      }
+      return { plugin: outcome.plugin };
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.put("/api/plugins/:id/config", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor?.platformAdmin) {
+        return reply.code(403).send({ reason: "需要平台管理员" });
+      }
+      const body = request.body as { config?: unknown };
+      const outcome = await pluginRuntime.saveConfig(database, (request.params as { id: string }).id, body.config, actor.username);
+      if (!outcome.ok) {
+        return reply.code(outcome.status).send({ reason: outcome.reason });
+      }
+      return { plugin: outcome.plugin };
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.get("/api/plugins/:id/events", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor?.platformAdmin) {
+        return reply.code(403).send({ reason: "需要平台管理员" });
+      }
+      return { events: await pluginRuntime.listEvents(database, (request.params as { id: string }).id) };
     } finally {
       await database.close();
     }
