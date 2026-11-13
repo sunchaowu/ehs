@@ -20,6 +20,11 @@ services:
     image: postgres:16
     networks:
       - system
+    volumes:
+      - system-db-data:/var/lib/postgresql/data
+
+volumes:
+  system-db-data: {}
 
 networks:
   edge: {}

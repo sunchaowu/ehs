@@ -22,5 +22,17 @@ describe("installInitialAdmin", () => {
     expect(first).toMatchObject({ username: "admin", created: true });
     expect(first.password).toHaveLength(24);
     expect(second).toEqual({ username: "admin", password: "", created: false });
+
+    const stored = await openDatabase(databaseUrl!);
+    const config = await stored.readConfig();
+    await stored.saveConfig({ ...config, "platform.title": "已修改的标题" });
+    await stored.close();
+
+    const third = await installInitialAdmin(databaseUrl!, input);
+    expect(third.created).toBe(false);
+
+    const after = await openDatabase(databaseUrl!);
+    expect((await after.readConfig())["platform.title"]).toBe("已修改的标题");
+    await after.close();
   });
 });

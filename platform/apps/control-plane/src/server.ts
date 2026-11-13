@@ -352,19 +352,24 @@ export async function buildServer(options?: {
       if (!displayName || !language) {
         return reply.code(400).send({ reason: "请输入显示名和语言" });
       }
-      await database.query("update users set display_name = $1, language = $2 where username = $3", [
-        displayName,
-        language,
-        actor.username,
-      ]);
-      if (password !== "") {
+      if (password.trim() !== "") {
         const config = await database.readConfig();
         const passwordHash = await hashPassword(password, {
           memoryKiB: config["password.argon2.memoryKiB"],
           iterations: config["password.argon2.iterations"],
           parallelism: config["password.argon2.parallelism"],
         });
-        await database.query("update users set password_hash = $1 where username = $2", [passwordHash, actor.username]);
+        // 先算好哈希再一次性写入，避免改密码失败时只改了显示名。
+        await database.query(
+          "update users set display_name = $1, language = $2, password_hash = $3 where username = $4",
+          [displayName, language, passwordHash, actor.username],
+        );
+      } else {
+        await database.query("update users set display_name = $1, language = $2 where username = $3", [
+          displayName,
+          language,
+          actor.username,
+        ]);
       }
       const user = await readSession(database, request.cookies.platform_session);
       return { user };

@@ -7,6 +7,7 @@ const { Pool } = pg;
 export type SystemDatabase = {
   migrate(): Promise<void>;
   saveConfig(config: SystemConfig): Promise<void>;
+  saveConfigDefaults(config: SystemConfig): Promise<void>;
   readConfig(): Promise<SystemConfig>;
   close(): Promise<void>;
   query<T extends pg.QueryResultRow = pg.QueryResultRow>(
@@ -57,6 +58,16 @@ export async function openDatabase(databaseUrl: string): Promise<SystemDatabase>
         await pool.query(
           `insert into system_config (key, value) values ($1, $2)
            on conflict (key) do update set value = excluded.value`,
+          [key, stored],
+        );
+      }
+    },
+    async saveConfigDefaults(config) {
+      for (const [key, value] of Object.entries(config)) {
+        const stored = Array.isArray(value) ? JSON.stringify(value) : String(value);
+        await pool.query(
+          `insert into system_config (key, value) values ($1, $2)
+           on conflict (key) do nothing`,
           [key, stored],
         );
       }

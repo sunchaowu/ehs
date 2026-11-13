@@ -61,17 +61,28 @@ ssh_opts=(
   -o ConnectTimeout=15
 )
 
+start_ts=$SECONDS
+
+step() {
+  local name="$1"
+  shift
+  local from=$SECONDS
+  printf '==> %s\n' "$name" >&2
+  "$@"
+  printf '<== %s 完成（%d 秒）\n' "$name" "$((SECONDS - from))" >&2
+}
+
 ssh_cmd() {
   ssh "${ssh_opts[@]}" "$DEPLOY_USER@$DEPLOY_HOST" "$@"
 }
 
-tar -C "$root" -czf - \
+step "打包并上传 platform/" tar -C "$root" -czf - \
   --exclude node_modules \
   --exclude dist \
   --exclude .git \
   . | ssh_cmd "mkdir -p \"\$HOME/enterprise-platform\" && tar -C \"\$HOME/enterprise-platform\" -xzf -"
 
-ssh_cmd bash -s << 'REMOTE'
+step "服务器构建与启动" ssh_cmd bash -s << 'REMOTE'
 set -euo pipefail
 cd "$HOME/enterprise-platform"
 chmod 600 deploy/.env
@@ -81,7 +92,35 @@ set +a
 printf '%s\n' "$DEPLOY_PASSWORD" | sudo -S -p "" -v
 sudo -n docker compose version >/dev/null 2>&1 || { echo "缺少 docker compose" >&2; exit 1; }
 compose=(sudo -n docker compose -p enterprise-platform -f deploy/compose.yaml -f deploy/compose.server.yaml)
+
+# 配置 Docker 镜像加速（幂等）：可用 DOCKER_REGISTRY_MIRRORS 覆盖，空格分隔。
+mirror_config=$(
+  printf '%s\n' "${DOCKER_REGISTRY_MIRRORS:-https://docker.1ms.run https://docker.m.daocloud.io https://docker.xuanyuan.me}" \
+    | tr ' ' '\n' | sed '/^$/d' | sed 's/^/    "/; s/$/",/' | sed '$ s/,$//'
+)
+mirror_json=$(printf '{\n  "registry-mirrors": [\n%s\n  ]\n}\n' "$mirror_config")
+mirror_current=$(sudo -n cat /etc/docker/daemon.json 2>/dev/null || true)
+if [[ "$mirror_current" == "$mirror_json" ]]; then
+  printf '==> Docker 镜像加速已配置，跳过\n' >&2
+else
+  from=$SECONDS
+  printf '==> 配置 Docker 镜像加速\n' >&2
+  printf '%s\n' "$mirror_json" | sudo -n tee /etc/docker/daemon.json >/dev/null
+  sudo -n systemctl restart docker
+  printf '<== 镜像加速配置完成（%d 秒）\n' "$((SECONDS - from))" >&2
+fi
+
+from=$SECONDS
+printf '==> 拉起 system-db\n' >&2
 "${compose[@]}" up -d --build --wait system-db
+printf '<== system-db 完成（%d 秒）\n' "$((SECONDS - from))" >&2
+from=$SECONDS
+printf '==> 安装初始管理员\n' >&2
 "${compose[@]}" run --rm -T control-plane pnpm exec tsx apps/control-plane/src/install.ts </dev/null
+printf '<== 安装完成（%d 秒）\n' "$((SECONDS - from))" >&2
+from=$SECONDS
+printf '==> 构建并启动全量服务\n' >&2
 "${compose[@]}" up -d --build
+printf '<== 全量服务完成（%d 秒）\n' "$((SECONDS - from))" >&2
+printf '服务器阶段耗时 %d 秒\n' "$SECONDS" >&2
 REMOTE

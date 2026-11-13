@@ -188,6 +188,34 @@ describe("portal shell", () => {
     expect(screen.getByTestId("platform/account/wechat")).toHaveTextContent("未绑定");
   });
 
+  it("reports whether personal settings were saved", async () => {
+    const requests: Array<{ body?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: { body?: string }) => {
+        requests.push({ body: init?.body });
+        return { ok: true, json: async () => ({ user: admin }) };
+      }),
+    );
+    render(<App session={admin} title="企业应用平台" section="account" />);
+    fireEvent.change(screen.getByTestId("platform/account/password"), { target: { value: "  new-secret  " } });
+    fireEvent.click(screen.getByTestId("platform/account/save"));
+    expect(await screen.findByTestId("platform/account/feedback")).toHaveTextContent("已保存，下次登录请使用新密码");
+    expect(requests[0].body).toBe(JSON.stringify({ displayName: "管理员", language: "zh-CN", password: "new-secret" }));
+    vi.unstubAllGlobals();
+  });
+
+  it("shows the server reason when personal settings are rejected", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: false, json: async () => ({ reason: "请输入显示名和语言" }) })),
+    );
+    render(<App session={admin} title="企业应用平台" section="account" />);
+    fireEvent.click(screen.getByTestId("platform/account/save"));
+    expect(await screen.findByTestId("platform/account/feedback")).toHaveTextContent("请输入显示名和语言");
+    vi.unstubAllGlobals();
+  });
+
   it("shows plugin state, failure reason, and load toggles", async () => {
     const notice = {
       id: "portal-notice",

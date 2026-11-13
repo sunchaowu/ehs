@@ -693,32 +693,65 @@ function ModelPage(props: { config?: SystemConfigView }) {
 }
 
 function AccountPage(props: { session: SessionUser }) {
+  const [form] = Form.useForm();
+  const [saving, setSaving] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
   return (
     <Card title="个人配置">
     <Form
+      form={form}
       layout="vertical"
       initialValues={{ displayName: props.session.displayName, password: "", language: props.session.language }}
-      onFinish={async (values: { displayName: string; password: string; language: string }) => {
-        await fetch("/api/account", {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(values),
-        });
+      onFinish={async (values: { displayName: string; password?: string; language: string }) => {
+        setSaving(true);
+        setFeedback(null);
+        try {
+          const password = values.password?.trim() ?? "";
+          const response = await fetch("/api/account", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              displayName: values.displayName.trim(),
+              language: values.language.trim(),
+              password,
+            }),
+          });
+          const body = (await response.json().catch(() => ({}))) as { reason?: string };
+          if (!response.ok) {
+            setFeedback({ type: "error", message: body.reason ?? "保存失败" });
+            return;
+          }
+          form.setFieldValue("password", "");
+          setFeedback({ type: "success", message: password === "" ? "已保存" : "已保存，下次登录请使用新密码" });
+        } catch (error) {
+          setFeedback({ type: "error", message: error instanceof Error ? error.message : "保存失败" });
+        } finally {
+          setSaving(false);
+        }
       }}
     >
-      <Form.Item name="displayName" label="显示名">
+      <Form.Item name="displayName" label="显示名" rules={[{ required: true, whitespace: true, message: "请输入显示名" }]}>
         <Input data-testid="platform/account/display-name" />
       </Form.Item>
-      <Form.Item name="password" label="密码">
-        <Input.Password data-testid="platform/account/password" />
+      <Form.Item name="password" label="密码" extra="留空表示不修改密码">
+        <Input.Password data-testid="platform/account/password" autoComplete="new-password" />
       </Form.Item>
-      <Form.Item name="language" label="语言">
+      <Form.Item name="language" label="语言" rules={[{ required: true, whitespace: true, message: "请输入语言" }]}>
         <Input data-testid="platform/account/language" />
       </Form.Item>
       <Form.Item label="微信">
         <span data-testid="platform/account/wechat">{props.session.wechatBound ? "已绑定" : "未绑定"}</span>
       </Form.Item>
-      <Button htmlType="submit" type="primary" data-testid="platform/account/save">
+      {feedback ? (
+        <Alert
+          data-testid="platform/account/feedback"
+          type={feedback.type}
+          showIcon
+          message={feedback.message}
+          style={{ marginBottom: 16 }}
+        />
+      ) : null}
+      <Button htmlType="submit" type="primary" loading={saving} data-testid="platform/account/save">
         保存
       </Button>
     </Form>
