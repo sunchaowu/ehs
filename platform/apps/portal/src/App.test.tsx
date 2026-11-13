@@ -105,6 +105,12 @@ describe("portal shell", () => {
     expect(screen.getByTestId("platform/shell/language")).toHaveTextContent("zh-CN");
   });
 
+  it("fills the viewport and scrolls inside the content area only", () => {
+    render(<App session={admin} title="企业应用平台" />);
+    expect(screen.getByTestId("platform/shell/root")).toHaveClass("platform-shell");
+    expect(screen.getByTestId("platform/shell/content")).toHaveClass("platform-shell-content");
+  });
+
   it("opens account actions and collapses the navigation to icons", async () => {
     render(<App session={admin} title="企业应用平台" />);
     fireEvent.click(screen.getByTestId("platform/shell/account"));

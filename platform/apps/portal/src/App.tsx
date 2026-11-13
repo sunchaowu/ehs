@@ -221,7 +221,7 @@ function Workbench(props: {
     section === "system" ? copy.system : section === "plugin" ? copy.plugin : section === "model" ? copy.model : section === "account" ? copy.personal : project ? project.name : creating ? copy.projectName : copy.home;
   const languageChoices = props.languages.includes(props.session.language) ? props.languages : [props.session.language, ...props.languages];
   return (
-    <Layout data-testid="platform/shell/root" style={{ minHeight: "100vh" }}>
+    <Layout data-testid="platform/shell/root" className="platform-shell">
       {narrow ? (
         <Drawer placement="left" width={240} open={drawerOpen} onClose={() => setDrawerOpen(false)} title={props.title}>
           {navigation}
@@ -304,17 +304,17 @@ function Workbench(props: {
               },
             }}
           >
-            <Button type="text" data-testid="platform/shell/account" style={{ marginLeft: "auto", height: 56 }}>
-              <Space size={8}>
+            <Button type="text" data-testid="platform/shell/account" style={{ marginLeft: "auto", height: 56, paddingInline: narrow ? 8 : undefined }}>
+              <Space size={narrow ? 0 : 8}>
                 <Avatar style={{ backgroundColor: "#1677ff" }}>{props.session.displayName.slice(0, 1)}</Avatar>
-                <span data-testid="platform/shell/user">{props.session.displayName}</span>
-                <Tag data-testid="platform/shell/language">{props.session.language}</Tag>
+                {narrow ? null : <span data-testid="platform/shell/user">{props.session.displayName}</span>}
+                {narrow ? null : <Tag data-testid="platform/shell/language">{props.session.language}</Tag>}
               </Space>
             </Button>
           </Dropdown>
         </Header>
-        <Content data-testid="platform/shell/content" style={{ padding: narrow ? 8 : 16, background: "#f5f5f5" }}>
-          <div style={{ background: "#fff", borderRadius: 8, minHeight: "calc(100vh - 88px)", padding: narrow ? 12 : 24 }}>
+        <Content data-testid="platform/shell/content" className="platform-shell-content" style={{ padding: narrow ? 8 : 16, background: "#f5f5f5" }}>
+          <div style={{ background: "#fff", borderRadius: 8, minHeight: "100%", padding: narrow ? 12 : 24 }}>
           {section === "system" && props.session.platformAdmin ? (
             <SystemConfigPage config={props.config} onTitle={props.onTitle} />
           ) : null}
