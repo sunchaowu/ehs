@@ -118,7 +118,20 @@ export function App(props: {
   const locale = session?.language === "en-US" ? enUS : zhCN;
   const screen = !session ? (
     page === "register" ? (
-      <RegisterPage enabled={props.registrationEnabled !== false} />
+      <RegisterPage
+        enabled={props.registrationEnabled !== false}
+        onRegistered={(user, nextTitle, nextCanCreate, nextModelConfigured, nextLanguages) => {
+          setSession(user);
+          setCanCreateProject(nextCanCreate);
+          setModelConfigured(nextModelConfigured);
+          if (nextLanguages && nextLanguages.length > 0) {
+            setLanguages(nextLanguages);
+          }
+          if (nextTitle) {
+            setTitle(nextTitle);
+          }
+        }}
+      />
     ) : (
       <LoginPage
         wechatAvailable={props.wechatAvailable === true}
@@ -793,7 +806,11 @@ function LoginPage(props: {
   );
 }
 
-function RegisterPage(props: { enabled: boolean }) {
+function RegisterPage(props: {
+  enabled: boolean;
+  onRegistered: (user: SessionUser, title: string | undefined, canCreateProject: boolean, modelConfigured: boolean, languages?: string[]) => void;
+}) {
+  const [reason, setReason] = useState("");
   if (!props.enabled) {
     return (
       <main className="platform-auth">
@@ -806,7 +823,41 @@ function RegisterPage(props: { enabled: boolean }) {
   return (
     <main className="platform-auth">
       <Card data-testid="platform/register/card" title="注册" style={{ width: 420 }}>
-      <Form layout="vertical">
+      <Form
+        layout="vertical"
+        onFinish={async (values: { username: string; displayName: string; password: string }) => {
+          try {
+            const response = await fetch("/api/account/register", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(values),
+            });
+            const body = (await response.json()) as { reason?: string; user?: SessionUser };
+            if (!response.ok || !body.user) {
+              setReason(body.reason ?? "注册失败");
+              return;
+            }
+            const bootstrap = await fetch("/api/session");
+            const context = bootstrap.ok
+              ? ((await bootstrap.json()) as {
+                  title?: string;
+                  canCreateProject?: boolean;
+                  modelConfigured?: boolean;
+                  languages?: string[];
+                })
+              : null;
+            props.onRegistered(
+              body.user,
+              context?.title,
+              context?.canCreateProject === true,
+              context?.modelConfigured === true,
+              context?.languages,
+            );
+          } catch (error) {
+            setReason(error instanceof Error ? error.message : "注册失败");
+          }
+        }}
+      >
         <Form.Item name="username">
           <Input data-testid="platform/register/username" placeholder="用户名" />
         </Form.Item>
@@ -816,6 +867,7 @@ function RegisterPage(props: { enabled: boolean }) {
         <Form.Item name="password">
           <Input.Password data-testid="platform/register/password" placeholder="密码" />
         </Form.Item>
+        {reason ? <Alert type="error" showIcon message={reason} style={{ marginBottom: 16 }} /> : null}
         <Button data-testid="platform/register/submit" htmlType="submit" type="primary">
           注册
         </Button>

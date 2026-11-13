@@ -51,6 +51,44 @@ describe("portal login", () => {
     expect(screen.getByText("请联系管理员")).toBeInTheDocument();
     expect(screen.queryByTestId("platform/register/submit")).toBeNull();
   });
+
+  it("registers and opens the workbench", async () => {
+    const user = { username: "newuser", displayName: "新用户", language: "zh-CN", platformAdmin: false, wechatBound: false };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/account/register") {
+        return { ok: true, status: 201, json: async () => ({ user }) };
+      }
+      return { ok: true, json: async () => ({ title: "企业应用平台" }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App session={null} wechatAvailable={false} />);
+    fireEvent.click(screen.getByTestId("platform/login/register"));
+    fireEvent.change(screen.getByTestId("platform/register/username"), { target: { value: "newuser" } });
+    fireEvent.change(screen.getByTestId("platform/register/display-name"), { target: { value: "新用户" } });
+    fireEvent.change(screen.getByTestId("platform/register/password"), { target: { value: "secret" } });
+    fireEvent.click(screen.getByTestId("platform/register/submit"));
+    expect(await screen.findByTestId("platform/shell/user")).toHaveTextContent("新用户");
+    expect(fetchMock).toHaveBeenCalledWith("/api/account/register", expect.anything());
+    vi.unstubAllGlobals();
+  });
+
+  it("shows the server reason when registration is rejected", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/account/register") {
+        return { ok: false, status: 403, json: async () => ({ reason: "请联系管理员" }) };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App session={null} wechatAvailable={false} />);
+    fireEvent.click(screen.getByTestId("platform/login/register"));
+    fireEvent.change(screen.getByTestId("platform/register/username"), { target: { value: "newuser" } });
+    fireEvent.change(screen.getByTestId("platform/register/display-name"), { target: { value: "新用户" } });
+    fireEvent.change(screen.getByTestId("platform/register/password"), { target: { value: "secret" } });
+    fireEvent.click(screen.getByTestId("platform/register/submit"));
+    expect(await screen.findByText("请联系管理员")).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
 });
 
 const admin = { username: "admin", displayName: "管理员", language: "zh-CN", platformAdmin: true, wechatBound: false };
