@@ -80,12 +80,28 @@ step "打包并上传 platform/" tar -C "$root" -czf - \
   --exclude node_modules \
   --exclude dist \
   --exclude .git \
+  --exclude ./deploy/.env \
   . | ssh_cmd "mkdir -p \"\$HOME/enterprise-platform\" && tar -C \"\$HOME/enterprise-platform\" -xzf -"
 
 step "服务器构建与启动" ssh_cmd bash -s << 'REMOTE'
 set -euo pipefail
 cd "$HOME/enterprise-platform"
+if [[ ! -f deploy/.env ]]; then
+  echo "服务器缺少 deploy/.env（部署包不再覆盖服务器专用配置），请先创建后再部署" >&2
+  exit 1
+fi
 chmod 600 deploy/.env
+# 上传完整性校验：缺任何一个关键文件都说明 tar 上传不完整，立即失败。
+for required_file in \
+  package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json \
+  apps/control-plane/Dockerfile \
+  apps/portal/Dockerfile apps/portal/package.json apps/portal/pnpm-workspace.yaml \
+  scripts/deploy.sh deploy/compose.yaml deploy/compose.server.yaml; do
+  if [[ ! -f "$required_file" ]]; then
+    echo "上传不完整：缺少 $required_file" >&2
+    exit 1
+  fi
+done
 set -a
 source deploy/.env
 set +a

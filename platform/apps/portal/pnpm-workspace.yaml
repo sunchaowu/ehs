@@ -1,0 +1,8 @@
+# pnpm 10.16+ 从本文件读取构建脚本批准，package.json 的 pnpm 字段不再生效。
+# vite 依赖 esbuild，其 postinstall 校验二进制，需要批准。
+# onlyBuiltDependencies 是 pnpm 10 语法，allowBuilds 是 pnpm 12 语法，两者都写以兼容。
+onlyBuiltDependencies:
+  - esbuild
+
+allowBuilds:
+  esbuild: true

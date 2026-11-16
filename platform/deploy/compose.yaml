@@ -1,5 +1,6 @@
 services:
   proxy:
+    restart: unless-stopped
     image: caddy:2
     networks:
       - edge
@@ -9,14 +10,17 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
   portal:
+    restart: unless-stopped
     image: enterprise-platform-portal
     networks:
       - system
   control-plane:
+    restart: unless-stopped
     image: enterprise-platform-control-plane
     networks:
       - system
   system-db:
+    restart: unless-stopped
     image: postgres:16
     networks:
       - system

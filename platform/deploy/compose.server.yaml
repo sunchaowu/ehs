@@ -5,6 +5,23 @@ services:
     command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile.server", "--adapter", "caddyfile"]
     volumes:
       - ./Caddyfile.server:/etc/caddy/Caddyfile.server:ro
+  registry:
+    restart: unless-stopped
+    image: docker.io/library/registry:2
+    environment:
+      REGISTRY_HTTP_ADDR: ":5000"
+      REGISTRY_HTTP_TLS_CERTIFICATE: /certs/domain.crt
+      REGISTRY_HTTP_TLS_KEY: /certs/domain.key
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"
+    volumes:
+      - ./registry/certs:/certs:ro
+      - registry-data:/var/lib/registry
+    ports:
+      - "127.0.0.1:5000:5000"
+    networks:
+      system:
+        aliases:
+          - registry.internal
   system-db:
     environment:
       POSTGRES_USER: platform
@@ -27,7 +44,12 @@ services:
       DATABASE_PROD_ADMIN_URL: ${DATABASE_PROD_ADMIN_URL}
       DATABASE_TEST_ADMIN_URL: ${DATABASE_TEST_ADMIN_URL}
       REGISTRY_ADDRESS: ${REGISTRY_ADDRESS}
+      # 默认不重置管理员密码；只有显式设置 ADMIN_RESET=1 才会重置。
+      ADMIN_RESET: ${ADMIN_RESET:-}
   portal:
     build:
       context: ../apps/portal
       dockerfile: Dockerfile
+
+volumes:
+  registry-data: {}

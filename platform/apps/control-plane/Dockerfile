@@ -3,7 +3,7 @@ WORKDIR /app
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN --mount=type=cache,id=corepack,target=/root/.cache/node/corepack \
     corepack enable && corepack prepare pnpm@10.22.0 --activate
-COPY package.json pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 COPY apps/control-plane apps/control-plane
