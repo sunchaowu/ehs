@@ -27,6 +27,10 @@ services:
       POSTGRES_USER: platform
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: platform
+    # 系统库数据固定存放在命名卷，初始化一次后重启、重建容器都不会改变，
+    # 也避免匿名卷被 docker volume prune 清掉后重新初始化管理员。
+    volumes:
+      - system-db-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U platform -d platform"]
       interval: 2s
@@ -53,3 +57,4 @@ services:
 
 volumes:
   registry-data: {}
+  system-db-data: {}
