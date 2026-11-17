@@ -199,6 +199,47 @@ create table if not exists published_versions (
   image_digest text not null
 );
 
+create table if not exists test_cases (
+  id uuid primary key,
+  project_id uuid not null references projects (id) on delete cascade,
+  origin text not null,
+  method text not null,
+  code text not null,
+  name text not null,
+  steps jsonb not null,
+  created_at timestamptz not null,
+  unique (project_id, code)
+);
+
+create table if not exists test_runs (
+  id uuid primary key,
+  project_id uuid not null references projects (id) on delete cascade,
+  image_digest text not null,
+  status text not null,
+  failure text not null default '',
+  replayed_from uuid references test_runs (id) on delete set null,
+  replayed_from_digest text,
+  started_at timestamptz not null,
+  finished_at timestamptz
+);
+
+create table if not exists test_step_records (
+  id uuid primary key,
+  run_id uuid not null references test_runs (id) on delete cascade,
+  case_code text not null,
+  case_name text not null,
+  step_index integer not null,
+  method text not null,
+  image_digest text not null,
+  started_at timestamptz not null,
+  locator text not null default '',
+  input jsonb not null default '{}'::jsonb,
+  expected text not null default '',
+  actual text not null default '',
+  passed boolean not null,
+  reason text not null default ''
+);
+
 create table if not exists portal_notifications (
   id uuid primary key,
   user_id uuid not null references users (id) on delete cascade,

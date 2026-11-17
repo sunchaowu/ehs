@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { compileDesign, type DesignDocument } from "./compiler.js";
 import type { SystemDatabase } from "./database.js";
+import { regenerateTestCases } from "./test-cases.js";
 
 export async function storeCompiledDesign(
   database: SystemDatabase,
@@ -45,6 +46,7 @@ export async function storeCompiledDesign(
      values (gen_random_uuid(), $1, $2, $3::jsonb, $4, $5::jsonb, now())`,
     [projectId, designRevision(design), JSON.stringify(design), compiled.sourceRevision, JSON.stringify(compiled.files)],
   );
+  await regenerateTestCases(database, { id: projectId, code: design.projectCode }, design);
   return { sourceRevision: compiled.sourceRevision };
 }
 

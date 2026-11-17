@@ -51,6 +51,44 @@ describe("portal login", () => {
     expect(screen.getByText("请联系管理员")).toBeInTheDocument();
     expect(screen.queryByTestId("platform/register/submit")).toBeNull();
   });
+
+  it("registers and opens the workbench", async () => {
+    const user = { username: "newuser", displayName: "新用户", language: "zh-CN", platformAdmin: false, wechatBound: false };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/account/register") {
+        return { ok: true, status: 201, json: async () => ({ user }) };
+      }
+      return { ok: true, json: async () => ({ title: "企业应用平台" }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App session={null} wechatAvailable={false} />);
+    fireEvent.click(screen.getByTestId("platform/login/register"));
+    fireEvent.change(screen.getByTestId("platform/register/username"), { target: { value: "newuser" } });
+    fireEvent.change(screen.getByTestId("platform/register/display-name"), { target: { value: "新用户" } });
+    fireEvent.change(screen.getByTestId("platform/register/password"), { target: { value: "secret" } });
+    fireEvent.click(screen.getByTestId("platform/register/submit"));
+    expect(await screen.findByTestId("platform/shell/user")).toHaveTextContent("新用户");
+    expect(fetchMock).toHaveBeenCalledWith("/api/account/register", expect.anything());
+    vi.unstubAllGlobals();
+  });
+
+  it("shows the server reason when registration is rejected", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/account/register") {
+        return { ok: false, status: 403, json: async () => ({ reason: "请联系管理员" }) };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App session={null} wechatAvailable={false} />);
+    fireEvent.click(screen.getByTestId("platform/login/register"));
+    fireEvent.change(screen.getByTestId("platform/register/username"), { target: { value: "newuser" } });
+    fireEvent.change(screen.getByTestId("platform/register/display-name"), { target: { value: "新用户" } });
+    fireEvent.change(screen.getByTestId("platform/register/password"), { target: { value: "secret" } });
+    fireEvent.click(screen.getByTestId("platform/register/submit"));
+    expect(await screen.findByText("请联系管理员")).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
 });
 
 const admin = { username: "admin", displayName: "管理员", language: "zh-CN", platformAdmin: true, wechatBound: false };
@@ -65,6 +103,12 @@ describe("portal shell", () => {
     expect(screen.getByTestId("platform/shell/header")).toHaveStyle({ height: "56px" });
     expect(screen.getByTestId("platform/shell/user")).toHaveTextContent("管理员");
     expect(screen.getByTestId("platform/shell/language")).toHaveTextContent("zh-CN");
+  });
+
+  it("fills the viewport and scrolls inside the content area only", () => {
+    render(<App session={admin} title="企业应用平台" />);
+    expect(screen.getByTestId("platform/shell/root")).toHaveClass("platform-shell");
+    expect(screen.getByTestId("platform/shell/content")).toHaveClass("platform-shell-content");
   });
 
   it("opens account actions and collapses the navigation to icons", async () => {
@@ -158,6 +202,83 @@ describe("portal shell", () => {
     vi.unstubAllGlobals();
   });
 
+  it("shows test results and replays a record", async () => {
+    const requests: Array<{ url: string; method?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: { method?: string }) => {
+        const target = String(url);
+        requests.push({ url: target, method: init?.method });
+        if (target.endsWith("/tests/runs/run-1/replay") && init?.method === "POST") {
+          return { ok: true, json: async () => ({ runId: "run-2", status: "passed" }) };
+        }
+        if (target.endsWith("/tests/runs/run-1")) {
+          return {
+            ok: true,
+            json: async () => ({
+              run: { id: "run-1" },
+              steps: [
+                {
+                  caseCode: "case-1",
+                  caseName: "新增请假单",
+                  stepIndex: 3,
+                  method: "black-box",
+                  startedAt: "2026-11-12T08:00:01.000Z",
+                  expected: "保存成功",
+                  actual: "保存失败",
+                  passed: false,
+                  reason: "提交后未看到成功提示",
+                },
+              ],
+            }),
+          };
+        }
+        if (target.endsWith("/tests")) {
+          return {
+            ok: true,
+            json: async () => ({
+              candidateDigest: "sha256:abcdef0123456789",
+              cases: [{ origin: "auto", method: "black-box", code: "case-1", name: "新增请假单" }],
+              runs: [
+                {
+                  id: "run-1",
+                  imageDigest: "sha256:abcdef0123456789",
+                  status: "failed",
+                  failure: "",
+                  replayedFrom: null,
+                  replayedFromDigest: null,
+                  startedAt: "2026-11-12T08:00:00.000Z",
+                  finishedAt: null,
+                  failedCases: ["新增请假单"],
+                },
+              ],
+            }),
+          };
+        }
+        if (target.endsWith("/release")) {
+          return {
+            ok: true,
+            json: async () => ({ published: false, nodes: [], candidateDigest: "sha256:abcdef0123456789", testResult: { passed: false, failedCases: ["新增请假单"] } }),
+          };
+        }
+        return { ok: true, json: async () => ({ project: { name: "请假审批", code: "leave" } }) };
+      }),
+    );
+    render(<App session={admin} title="企业应用平台" />);
+    fireEvent.click(screen.getByTestId("platform/project/new"));
+    fireEvent.change(screen.getByTestId("platform/project/name"), { target: { value: "请假审批" } });
+    fireEvent.click(screen.getByTestId("platform/project/save"));
+    expect(await screen.findByTestId("platform/test-results/card")).toBeInTheDocument();
+    expect(await screen.findByTestId("platform/test-results/case-case-1")).toHaveTextContent("新增请假单");
+    expect(screen.getByTestId("platform/test-results/case-case-1")).toHaveTextContent("失败");
+    expect(screen.getByTestId("platform/test-results/case-case-1")).toHaveTextContent("第 3 步");
+    fireEvent.click(screen.getByTestId("platform/test-results/replay-run-1"));
+    await vi.waitFor(() => {
+      expect(requests.some((request) => request.url.endsWith("/tests/runs/run-1/replay") && request.method === "POST")).toBe(true);
+    });
+    vi.unstubAllGlobals();
+  });
+
   it("renders system, plugin, model, and personal settings", () => {
     const config = {
       "platform.title": "企业应用平台",
@@ -186,34 +307,6 @@ describe("portal shell", () => {
     rerender(<App session={admin} title="企业应用平台" section="account" />);
     expect(screen.getByTestId("platform/account/display-name")).toHaveValue("管理员");
     expect(screen.getByTestId("platform/account/wechat")).toHaveTextContent("未绑定");
-  });
-
-  it("reports whether personal settings were saved", async () => {
-    const requests: Array<{ body?: string }> = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (_url: string, init?: { body?: string }) => {
-        requests.push({ body: init?.body });
-        return { ok: true, json: async () => ({ user: admin }) };
-      }),
-    );
-    render(<App session={admin} title="企业应用平台" section="account" />);
-    fireEvent.change(screen.getByTestId("platform/account/password"), { target: { value: "  new-secret  " } });
-    fireEvent.click(screen.getByTestId("platform/account/save"));
-    expect(await screen.findByTestId("platform/account/feedback")).toHaveTextContent("已保存，下次登录请使用新密码");
-    expect(requests[0].body).toBe(JSON.stringify({ displayName: "管理员", language: "zh-CN", password: "new-secret" }));
-    vi.unstubAllGlobals();
-  });
-
-  it("shows the server reason when personal settings are rejected", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => ({ ok: false, json: async () => ({ reason: "请输入显示名和语言" }) })),
-    );
-    render(<App session={admin} title="企业应用平台" section="account" />);
-    fireEvent.click(screen.getByTestId("platform/account/save"));
-    expect(await screen.findByTestId("platform/account/feedback")).toHaveTextContent("请输入显示名和语言");
-    vi.unstubAllGlobals();
   });
 
   it("shows plugin state, failure reason, and load toggles", async () => {
@@ -273,6 +366,34 @@ describe("portal shell", () => {
         requests.some((request) => request.url === "/api/plugins/portal-notice/config" && request.body?.includes("停机维护")),
       ).toBe(true);
     });
+    vi.unstubAllGlobals();
+  });
+
+  it("reports whether personal settings were saved", async () => {
+    const requests: Array<{ body?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: { body?: string }) => {
+        requests.push({ body: init?.body });
+        return { ok: true, json: async () => ({ user: admin }) };
+      }),
+    );
+    render(<App session={admin} title="企业应用平台" section="account" />);
+    fireEvent.change(screen.getByTestId("platform/account/password"), { target: { value: "  new-secret  " } });
+    fireEvent.click(screen.getByTestId("platform/account/save"));
+    expect(await screen.findByTestId("platform/account/feedback")).toHaveTextContent("已保存，下次登录请使用新密码");
+    expect(requests[0].body).toBe(JSON.stringify({ displayName: "管理员", language: "zh-CN", password: "new-secret" }));
+    vi.unstubAllGlobals();
+  });
+
+  it("shows the server reason when personal settings are rejected", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: false, json: async () => ({ reason: "请输入显示名和语言" }) })),
+    );
+    render(<App session={admin} title="企业应用平台" section="account" />);
+    fireEvent.click(screen.getByTestId("platform/account/save"));
+    expect(await screen.findByTestId("platform/account/feedback")).toHaveTextContent("请输入显示名和语言");
     vi.unstubAllGlobals();
   });
 });

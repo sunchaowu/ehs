@@ -1,11 +1,13 @@
 import cookie from "@fastify/cookie";
 import Fastify, { type FastifyInstance } from "fastify";
 import { createUser, disableUser, loginWithPassword, readSession, registerAccount } from "./accounts.js";
-import { addMenu, applyTool, assignRole, cancelPublication, confirmPublication, confirmSolution, createProjectImage, effectiveActions, grantAccess, listRequirementMessages, postRequirementMessage, publishedMenus, readDraft, readProjectSource, readReleaseStatus } from "./drafts.js";
+import { addMenu, applyOaTemplate, applyTool, assignRole, cancelPublication, confirmPublication, confirmSolution, createProjectImage, effectiveActions, grantAccess, listRequirementMessages, memberProject, managedProject, postRequirementMessage, publishedMenus, readDraft, readProjectSource, readReleaseStatus } from "./drafts.js";
 import { openDatabase } from "./database.js";
 import { dockerImageBuilder, type ImageBuildInput } from "./images.js";
 import { opensslCertificateIssuer, type NodeCertificate } from "./node-install.js";
 import { assignNodePool, poolsOverlap, prepareNodeInstall, registerNode } from "./nodes.js";
+import { defaultTestExecutor, type TestExecutor } from "./test-executor.js";
+import { readTestOverview, readTestRunSteps, replayTestRun, runProjectTests } from "./test-runs.js";
 import { createPluginRuntime } from "./plugin-runtime.js";
 import { acceptHealthReport, readDesiredWork, type ReportedProject } from "./releases.js";
 import { hashPassword } from "./passwords.js";
@@ -23,6 +25,7 @@ export async function buildServer(options?: {
   databaseProvisioner?: DatabaseProvisioner;
   certificateIssuer?: (nodeName: string) => Promise<NodeCertificate | { reason: string }>;
   pluginRuntime?: PluginRuntime;
+  testExecutor?: TestExecutor;
 }): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, trustProxy: true });
   await app.register(cookie);
@@ -32,6 +35,7 @@ export async function buildServer(options?: {
   const databaseProvisioner = options?.databaseProvisioner ?? provisionPostgresDatabase;
   const certificateIssuer = options?.certificateIssuer ?? opensslCertificateIssuer;
   const pluginRuntime = options?.pluginRuntime ?? createPluginRuntime();
+  const testExecutor = options?.testExecutor ?? defaultTestExecutor();
   app.get("/health", async () => ({ status: "ok" }));
   app.get("/slots", async () => ({ slots: listSlots() }));
   if (databaseUrl) {
@@ -470,6 +474,30 @@ export async function buildServer(options?: {
     }
   });
 
+  app.post("/api/projects/:code/apply-template", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const body = (request.body ?? {}) as { template?: string };
+      if (body.template !== "oa") {
+        return reply.code(400).send({ reason: "未知模板" });
+      }
+      const result = await applyOaTemplate(database, actor, (request.params as { code: string }).code);
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return reply.code(201).send(result);
+    } finally {
+      await database.close();
+    }
+  });
+
   app.get("/api/projects/:code/draft", async (request, reply) => {
     const database = await requireDatabase(databaseUrl, reply);
     if (!database) {
@@ -835,6 +863,102 @@ export async function buildServer(options?: {
     }
   });
 
+  app.get("/api/projects/:code/tests", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const projectCode = (request.params as { code: string }).code;
+      const project = await memberProject(database, actor, projectCode);
+      if ("reason" in project) {
+        return reply.code(project.status).send({ reason: project.reason });
+      }
+      return await readTestOverview(database, project.id);
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.post("/api/projects/:code/tests", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const projectCode = (request.params as { code: string }).code;
+      const project = await managedProject(database, actor, projectCode);
+      if ("reason" in project) {
+        return reply.code(project.status).send({ reason: project.reason });
+      }
+      const result = await runProjectTests(database, { id: project.id, code: projectCode }, testExecutor);
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return reply.code(201).send(result);
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.get("/api/projects/:code/tests/runs/:runId", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const projectCode = (request.params as { code: string }).code;
+      const project = await memberProject(database, actor, projectCode);
+      if ("reason" in project) {
+        return reply.code(project.status).send({ reason: project.reason });
+      }
+      const result = await readTestRunSteps(database, project.id, (request.params as { runId: string }).runId);
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return result;
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.post("/api/projects/:code/tests/runs/:runId/replay", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const projectCode = (request.params as { code: string }).code;
+      const project = await managedProject(database, actor, projectCode);
+      if ("reason" in project) {
+        return reply.code(project.status).send({ reason: project.reason });
+      }
+      const result = await replayTestRun(database, { id: project.id, code: projectCode }, (request.params as { runId: string }).runId, testExecutor);
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return reply.code(201).send(result);
+    } finally {
+      await database.close();
+    }
+  });
+
   app.post("/api/projects/:code/tools", async (request, reply) => {
     const database = await requireDatabase(databaseUrl, reply);
     if (!database) {
@@ -850,6 +974,7 @@ export async function buildServer(options?: {
         actor,
         (request.params as { code: string }).code,
         request.body as { name?: string; arguments?: Record<string, unknown> },
+        testExecutor,
       );
       if ("reason" in result) {
         return reply.code(result.status).send({ reason: result.reason });

@@ -1,9 +1,13 @@
 import type { PublicUser } from "./accounts.js";
 import type { SystemDatabase } from "./database.js";
 import { latestCompiledSource, storeCompiledDesign } from "./designs.js";
+import { oaTemplate, type OaTemplate } from "./oa-template.js";
 import { isProjectCode, suggestProjectCode } from "./project-code.js";
 import { buildProjectImage, latestImageDigest, publishProject, type DatabaseProvisioner, type ImageBuilder } from "./publish.js";
 import { cancelDesiredPublication, readProjectRelease } from "./releases.js";
+import { defaultTestExecutor, type TestExecutor } from "./test-executor.js";
+import { normalizeUserCase } from "./test-cases.js";
+import { replayTestRun, runProjectTests, type TestRunResult } from "./test-runs.js";
 
 const allowedActions = ["访问", "新增", "修改", "删除"];
 const fieldTypes = ["text", "longText", "number", "boolean", "date", "datetime", "user", "ref"];
@@ -145,6 +149,133 @@ export async function effectiveActions(
     [projectCode, menuCode, username],
   );
   return allowedActions.filter((action) => found.rows.some((row) => row.action === action));
+}
+
+export type ApplyTemplateResult = {
+  applied: true;
+  template: string;
+  menus: number;
+  entities: number;
+  workflows: number;
+  grants: number;
+  cases: number;
+};
+
+export async function applyOaTemplate(
+  database: SystemDatabase,
+  actor: PublicUser,
+  projectCode: string,
+  template: OaTemplate = oaTemplate(projectCode),
+): Promise<ApplyTemplateResult | { reason: string; status: number }> {
+  const project = await managedProject(database, actor, projectCode);
+  if ("reason" in project) {
+    return project;
+  }
+  // 菜单：同名复用已有编码，避免重复应用时堆叠「组织-2」
+  const menuCodes = new Map<string, string>();
+  let sort = await database.query<{ next: number }>(
+    "select coalesce(max(sort), 0) + 1 as next from draft_menus where project_id = $1",
+    [project.id],
+  );
+  let nextSort = sort.rows[0].next;
+  for (const menu of template.menus) {
+    const existing = await database.query<{ code: string }>(
+      "select code from draft_menus where project_id = $1 and name = $2",
+      [project.id, menu.name],
+    );
+    if (existing.rows[0]) {
+      menuCodes.set(menu.key, existing.rows[0].code);
+      continue;
+    }
+    const suggested = suggestProjectCode(menu.name);
+    if ("reason" in suggested) {
+      return { reason: `无法生成菜单编码：${menu.name}`, status: 400 };
+    }
+    const code = await unusedMenuCode(database, project.id, suggested.code);
+    const parent = menu.parent ? menuCodes.get(template.menus.find((item) => item.name === menu.parent)?.key ?? "") ?? null : null;
+    await database.query(
+      `insert into draft_menus (id, project_id, code, name, parent_code, sort)
+       values (gen_random_uuid(), $1, $2, $3, $4, $5)`,
+      [project.id, code, menu.name, parent, nextSort],
+    );
+    menuCodes.set(menu.key, code);
+    nextSort += 1;
+  }
+  // 数据与流程：同名跳过，不覆盖已有草稿
+  let entityCount = 0;
+  for (const entity of template.entities) {
+    const found = await database.query(
+      "select 1 from draft_records where project_id = $1 and kind = 'entity' and body->>'name' = $2",
+      [project.id, entity.name],
+    );
+    if (found.rows.length > 0) {
+      continue;
+    }
+    await database.query(
+      "insert into draft_records (id, project_id, kind, body) values (gen_random_uuid(), $1, 'entity', $2::jsonb)",
+      [project.id, JSON.stringify({ name: entity.name, fields: entity.fields })],
+    );
+    entityCount += 1;
+  }
+  let workflowCount = 0;
+  const foundWorkflow = await database.query(
+    "select 1 from draft_records where project_id = $1 and kind = 'workflow' and body->>'name' = $2",
+    [project.id, template.workflow.name],
+  );
+  if (foundWorkflow.rows.length === 0) {
+    await database.query(
+      "insert into draft_records (id, project_id, kind, body) values (gen_random_uuid(), $1, 'workflow', $2::jsonb)",
+      [project.id, JSON.stringify(template.workflow)],
+    );
+    workflowCount = 1;
+  }
+  // 角色与授权
+  let grantCount = 0;
+  for (const grant of template.grants) {
+    const menuCode = menuCodes.get(template.menus.find((item) => item.name === grant.menu)?.key ?? "");
+    if (!menuCode) {
+      return { reason: `模板菜单缺失：${grant.menu}`, status: 500 };
+    }
+    await database.query(
+      "insert into project_roles (project_id, name) values ($1, $2) on conflict do nothing",
+      [project.id, grant.role],
+    );
+    for (const action of grant.actions) {
+      const inserted = await database.query<{ id: string }>(
+        `insert into draft_grants (project_id, principal_type, principal_name, menu_code, action)
+         values ($1, 'role', $2, $3, $4) on conflict do nothing returning id`,
+        [project.id, grant.role, menuCode, action],
+      );
+      if (inserted.rows[0]) {
+        grantCount += 1;
+      }
+    }
+  }
+  // 用户测试案例：同名跳过
+  let caseCount = 0;
+  for (const testCase of template.cases) {
+    const found = await database.query(
+      "select 1 from draft_records where project_id = $1 and kind = 'test_case' and body->>'name' = $2",
+      [project.id, testCase.name],
+    );
+    if (found.rows.length > 0) {
+      continue;
+    }
+    await database.query(
+      "insert into draft_records (id, project_id, kind, body) values (gen_random_uuid(), $1, 'test_case', $2::jsonb)",
+      [project.id, JSON.stringify({ method: testCase.method, name: testCase.name, steps: testCase.steps })],
+    );
+    caseCount += 1;
+  }
+  return {
+    applied: true,
+    template: template.name,
+    menus: menuCodes.size,
+    entities: entityCount,
+    workflows: workflowCount,
+    grants: grantCount,
+    cases: caseCount,
+  };
 }
 
 export async function confirmSolution(
@@ -325,7 +456,8 @@ export async function applyTool(
   actor: PublicUser,
   projectCode: string,
   call: { name?: string; arguments?: Record<string, unknown> },
-): Promise<{ recorded: true } | { reason: string; status: number }> {
+  executor: TestExecutor = defaultTestExecutor(),
+): Promise<{ recorded: true } | { reason: string; status: number } | TestRunResult> {
   const name = call.name ?? "";
   const args = call.arguments ?? {};
   if (name === "run_tests") {
@@ -341,10 +473,18 @@ export async function applyTool(
     if (!config["test.nodePool"].trim()) {
       return { reason: "测试节点池为空", status: 409 };
     }
-    return { reason: "在线测试尚未执行", status: 409 };
+    return runProjectTests(database, { id: project.id, code: projectCode }, executor);
   }
   if (name === "replay_test") {
-    return { reason: "没有这条测试记录", status: 404 };
+    const project = await managedProject(database, actor, projectCode);
+    if ("reason" in project) {
+      return project;
+    }
+    const recordId = stringArg(args.record);
+    if (!recordId) {
+      return { reason: "缺少测试记录", status: 400 };
+    }
+    return replayTestRun(database, { id: project.id, code: projectCode }, recordId, executor);
   }
   const project = await managedProject(database, actor, projectCode);
   if ("reason" in project) {
@@ -392,6 +532,12 @@ export async function applyTool(
     return { recorded: true };
   }
   if (name === "mark_extension" || name === "add_test_case") {
+    if (name === "add_test_case") {
+      const normalized = normalizeUserCase(args);
+      if ("reason" in normalized) {
+        return { reason: normalized.reason, status: 400 };
+      }
+    }
     await database.query("insert into draft_records (id, project_id, kind, body) values (gen_random_uuid(), $1, $2, $3::jsonb)", [
       project.id,
       name === "mark_extension" ? "extension" : "test_case",
@@ -424,7 +570,7 @@ async function ownSession(database: SystemDatabase, projectId: string, username:
   return created.rows[0].id;
 }
 
-async function managedProject(
+export async function managedProject(
   database: SystemDatabase,
   actor: PublicUser,
   projectCode: string,
@@ -443,7 +589,7 @@ async function managedProject(
   return { id: found.rows[0].id };
 }
 
-async function memberProject(
+export async function memberProject(
   database: SystemDatabase,
   actor: PublicUser,
   projectCode: string,

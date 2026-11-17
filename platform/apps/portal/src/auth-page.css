@@ -1,5 +1,23 @@
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+.platform-shell {
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.platform-shell-content {
+  overflow: auto;
+}
+
 .platform-auth {
   min-height: 100vh;
+  min-height: 100dvh;
   display: grid;
   place-items: center;
   font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;

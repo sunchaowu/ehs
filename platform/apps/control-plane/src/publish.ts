@@ -2,6 +2,7 @@ import type { SystemDatabase } from "./database.js";
 import { latestCompiledSource } from "./designs.js";
 import { projectDatabaseName, type ImageBuildInput } from "./images.js";
 import { poolNames } from "./nodes.js";
+import { candidateTestVerdict } from "./test-gate.js";
 import pg from "pg";
 
 export type ImageBuilder = (input: ImageBuildInput) => Promise<{ digest: string } | { reason: string }>;
@@ -79,7 +80,10 @@ export async function publishProject(
   }
   const config = await database.readConfig();
   if (config["test.requirePassBeforePublish"]) {
-    return { reason: "当前候选测试未全部通过", status: 409, failedCases: [] };
+    const verdict = await candidateTestVerdict(database, project.id, digest);
+    if (!verdict.passed) {
+      return { reason: "当前候选测试未全部通过", status: 409, failedCases: verdict.failedCases };
+    }
   }
   const nodes = poolNames(config["scheduler.defaultNodePool"]);
   if (nodes.length === 0) {
@@ -137,7 +141,7 @@ export async function provisionPostgresDatabase(input: {
   adminUrl: string;
   databaseName: string;
 }): Promise<{ created: true } | { reason: string }> {
-  if (!/^[a-z][a-z0-9_]{0,62}$/.test(input.databaseName)) {
+  if (!/^[a-z][a-z0-9_-]{0,62}$/.test(input.databaseName)) {
     return { reason: "正式库创建失败：库名无效" };
   }
   const client = new pg.Client({ connectionString: input.adminUrl });
@@ -151,6 +155,28 @@ export async function provisionPostgresDatabase(input: {
   } catch (error) {
     const message = error instanceof Error ? error.message : "正式库创建失败";
     return { reason: `正式库创建失败：${message}` };
+  } finally {
+    await client.end().catch(() => undefined);
+  }
+}
+
+/** 每次测试前重建测试库：先删除（PG 13+ FORCE）再创建。库名经校验只含 [a-z0-9_-]，用双引号拼接。 */
+export async function rebuildPostgresDatabase(input: {
+  adminUrl: string;
+  databaseName: string;
+}): Promise<{ created: true } | { reason: string }> {
+  if (!/^[a-z][a-z0-9_-]{0,62}$/.test(input.databaseName)) {
+    return { reason: "测试库创建失败：库名无效" };
+  }
+  const client = new pg.Client({ connectionString: input.adminUrl });
+  try {
+    await client.connect();
+    await client.query(`drop database if exists "${input.databaseName}" with (force)`);
+    await client.query(`create database "${input.databaseName}"`);
+    return { created: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "测试库创建失败";
+    return { reason: `测试库创建失败：${message}` };
   } finally {
     await client.end().catch(() => undefined);
   }
