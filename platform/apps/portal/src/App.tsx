@@ -45,6 +45,8 @@ export type SystemConfigView = {
 
 type Section = "system" | "plugin" | "model" | "account";
 
+type ProjectSummary = { name: string; code: string; containerGroup: string; projectAdmin: boolean };
+
 export type PluginSummary = {
   id: string;
   title: string;
@@ -187,8 +189,42 @@ function Workbench(props: {
   const [section, setSection] = useState<Section | null>(props.initialSection);
   const [creating, setCreating] = useState(false);
   const [project, setProject] = useState<{ name: string; code: string } | null>(null);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const loadProjects = () => {
+    void fetch("/api/projects")
+      .then(async (response) => {
+        if (!response.ok) {
+          return [];
+        }
+        const body = (await response.json()) as { projects?: ProjectSummary[] };
+        return body.projects ?? [];
+      })
+      .then((list) => {
+        setProjects(list);
+        setProjectsLoaded(true);
+        // 恢复上次打开的项目：刷新页面后自动回到工作状态
+        setProject((current) => {
+          if (current) {
+            return current;
+          }
+          const stored = localStorage.getItem("platform.project");
+          const found = stored ? list.find((item) => item.code === stored) : undefined;
+          return found ? { name: found.name, code: found.code } : current;
+        });
+      })
+      .catch(() => setProjectsLoaded(true));
+  };
+  useEffect(() => {
+    loadProjects();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const openProject = (item: { name: string; code: string }) => {
+    setProject(item);
+    localStorage.setItem("platform.project", item.code);
+  };
   useEffect(() => {
     setSection(props.initialSection);
   }, [props.initialSection]);
@@ -299,6 +335,7 @@ function Workbench(props: {
                   setSection("system");
                 }
                 if (key === "logout") {
+                  localStorage.removeItem("platform.project");
                   void fetch("/api/session/logout", { method: "POST" }).finally(() => props.onLogout());
                 }
               },
@@ -324,7 +361,30 @@ function Workbench(props: {
           {section === null && project ? (
             <ProjectPage project={project} modelConfigured={props.modelConfigured} modelNotice={copy.modelUnavailable} />
           ) : null}
-          {section === null && !project && creating ? <CreateProjectPage onCreated={setProject} /> : null}
+          {section === null && !project && creating ? (
+            <CreateProjectPage
+              onCreated={(created) => {
+                openProject(created);
+                loadProjects();
+              }}
+            />
+          ) : null}
+          {section === null && !project && !creating && projects.length > 0 ? (
+            <Card title={copy.myProjects} style={{ marginBottom: props.canCreateProject ? 16 : 0 }}>
+              <List
+                data-testid="platform/project/list"
+                dataSource={projects}
+                renderItem={(item) => (
+                  <List.Item style={{ cursor: "pointer" }} onClick={() => openProject(item)}>
+                    <List.Item.Meta
+                      title={<span data-testid="platform/project/open">{item.name}</span>}
+                      description={item.code}
+                    />
+                  </List.Item>
+                )}
+              />
+            </Card>
+          ) : null}
           {section === null && !project && !creating && props.canCreateProject ? (
             <Card>
               <Button type="primary" data-testid="platform/project/new" onClick={() => setCreating(true)}>
@@ -332,7 +392,9 @@ function Workbench(props: {
               </Button>
             </Card>
           ) : null}
-          {section === null && !project && !creating && !props.canCreateProject ? <Empty description={copy.contactAdmin} /> : null}
+          {section === null && !project && !creating && projects.length === 0 && !props.canCreateProject ? (
+            <Empty description={copy.contactAdmin} />
+          ) : null}
           </div>
         </Content>
       </Layout>

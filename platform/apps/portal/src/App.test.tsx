@@ -149,6 +149,30 @@ describe("portal shell", () => {
     vi.unstubAllGlobals();
   });
 
+  it("lists projects on the workbench and restores the last opened one after a refresh", async () => {
+    localStorage.clear();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/projects") {
+        return {
+          ok: true,
+          json: async () => ({ projects: [{ name: "请假审批", code: "qing-jia-shen-pi", containerGroup: "qing-jia-shen-pi", projectAdmin: true }] }),
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App session={admin} title="企业应用平台" />);
+    expect(await screen.findByTestId("platform/project/list")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("platform/project/open"));
+    expect(await screen.findByTestId("platform/project/draft")).toBeInTheDocument();
+    // 模拟刷新页面：重新挂载后应自动恢复上次打开的项目
+    cleanup();
+    render(<App session={admin} title="企业应用平台" />);
+    expect(await screen.findByTestId("platform/project/draft")).toBeInTheDocument();
+    localStorage.clear();
+    vi.unstubAllGlobals();
+  });
+
   it("shows a node that has not reported healthy on the release check", async () => {
     vi.stubGlobal(
       "fetch",
@@ -382,7 +406,7 @@ describe("portal shell", () => {
     fireEvent.change(screen.getByTestId("platform/account/password"), { target: { value: "  new-secret  " } });
     fireEvent.click(screen.getByTestId("platform/account/save"));
     expect(await screen.findByTestId("platform/account/feedback")).toHaveTextContent("已保存，下次登录请使用新密码");
-    expect(requests[0].body).toBe(JSON.stringify({ displayName: "管理员", language: "zh-CN", password: "new-secret" }));
+    expect(requests.map((item) => item.body).find(Boolean)).toBe(JSON.stringify({ displayName: "管理员", language: "zh-CN", password: "new-secret" }));
     vi.unstubAllGlobals();
   });
 
