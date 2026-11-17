@@ -105,6 +105,17 @@ done
 set -a
 source deploy/.env
 set +a
+
+# 私有仓库证书（幂等）：缺失时生成自签证书，否则 registry 会不断重启。
+mkdir -p deploy/registry/certs
+if [[ ! -s deploy/registry/certs/domain.crt || ! -s deploy/registry/certs/domain.key ]]; then
+  printf '==> 生成私有仓库证书\n' >&2
+  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+    -keyout deploy/registry/certs/domain.key -out deploy/registry/certs/domain.crt \
+    -subj "/CN=registry.internal" \
+    -addext "subjectAltName=DNS:registry.internal,DNS:localhost,IP:127.0.0.1" 2>/dev/null
+  chmod 640 deploy/registry/certs/domain.key
+fi
 printf '%s\n' "$DEPLOY_PASSWORD" | sudo -S -p "" -v
 sudo -n docker compose version >/dev/null 2>&1 || { echo "缺少 docker compose" >&2; exit 1; }
 compose=(sudo -n docker compose -p enterprise-platform -f deploy/compose.yaml -f deploy/compose.server.yaml)
