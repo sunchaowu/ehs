@@ -42,3 +42,8 @@
 - `platform/apps/control-plane/src/server.ts`
 - `platform/apps/control-plane/src/schema.sql`
 - `platform/apps/portal/src/App.tsx`
+
+## 2026-11-17 补充核对
+
+- 管线本身已按上述行为实现并部署，但生成产物还缺少运行时：`compiler.ts` 生成的模块引用 `@platform/runtime` 的 `createStandardModule`，仓库中尚无该包；`images.ts` 生成的 Dockerfile 只复制 `modules/`，没有依赖安装和启动命令；节点启动容器时也未传入口命令。因此当前发布出的镜像不能提供业务服务，接入运行时应作为后续独立事项，不改变本阶段的管线边界。
+
