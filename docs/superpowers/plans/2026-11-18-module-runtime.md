@@ -3,9 +3,9 @@
 | 项 | 值 |
 |---|---|
 | 文档时间 | 2026-11-18 10:20:00 +0800 |
-| 状态 | 第二版：已接入 PostgreSQL |
-| 范围 | 第 4 项遗留缺口：生成镜像的运行入口与数据落地 |
-| 源码提交 | `57e8a89`（运行库）、`bcb47bc`（数据库接入） |
+| 状态 | 第三版：已接入 PostgreSQL，平台侧可构建镜像 |
+| 范围 | 第 4 项遗留缺口：生成镜像的运行入口、数据落地与镜像构建能力 |
+| 源码提交 | `57e8a89`（运行库）、`bcb47bc`（数据库接入）、`c1d45e1`（构建能力） |
 | 部署验证 | 局域网 Ubuntu 手工构建镜像，带 `DATABASE_URL` 运行并重启验证 |
 
 ## 背景
@@ -53,6 +53,13 @@
 - 容器启动后节点代理在容器内执行 `/health` 请求（`docker exec ... node -e`），只有 `storage` 为 `postgres` 才上报 `databaseConnected: true`，否则上报失败原因。
 - `dockerContainerRuntime` 提供同样的模板参数和健康检查，供控制面测试与后续复用。
 
+### 平台侧镜像构建
+
+- `apps/control-plane/Dockerfile` 用 `docker:27-cli` 多阶段复制 Docker CLI 到运行镜像；`deploy/compose.server.yaml` 给控制面挂载 `/var/run/docker.sock`。
+- 挂载套接字等同宿主 root 权限，只部署在受控的运行区服务器，不放到接入区。
+- `registry.address` 常写成 `registry.internal`，构建标签会自动补默认端口 5000，避免推送到 443。
+- 部署 compose 后，`POST /api/projects/:code/image` 可在控制面容器内真正执行构建和推送；当前运行实例仍是 2026-11-17 的镜像，需要重新部署才生效。
+
 ### HTTP 接口
 
 - `GET /health`：状态、运行模式、存储类型、已加载项目及实体/流程数量。
@@ -71,7 +78,7 @@
 
 - **身份与授权**：模块定义里的 `grants` 只保存不校验，接口没有登录态；OA 模板里的「未授权访问被拒绝」案例还不能通过运行库验证。
 - **入口路由**：节点启动容器时没有发布端口，接入区也没有把项目流量转发到容器，浏览器暂时访问不到项目服务。
-- **平台侧镜像构建**：控制面容器里没有 Docker CLI 和套接字，`POST /api/projects/:code/image` 在部署环境无法真正构建；本次验证是在服务器上用生成的同一份 Dockerfile 手工构建。
+- **平台侧镜像构建的部署状态**：代码和 compose 已具备能力，但当前局域网实例还没重新部署；在重新部署前，`POST /api/projects/:code/image` 仍找不到 Docker CLI。
 - **公用容器组**：运行库已按项目编码分发，但镜像构建仍只包含当前项目模块，组内其他项目尚未合并进同一镜像。
 - **数据库账号生命周期**：运行库只建表，不创建数据库或角色；节点本机模板需指向已存在的项目库。
 
@@ -81,6 +88,8 @@
 - `pnpm exec vitest run --project runtime`：5 个用例通过（启动与接口、无效模块拒绝、镜像运行库与启动命令、`pg` 依赖打包、PostgreSQL 固定表存储）。
 - `node-runtime.test.ts`：5 个用例通过（拉取失败不启动、默认不注入数据库连接、模板注入与健康检查、运行中但未连库、上报协调结果）。
 - `stage4-finish.test.ts` 中安装脚本用例：通过，确认脚本含 `database.url` 与 `PLATFORM_DATABASE_URL_TEMPLATE` 说明且不内嵌 `postgres://`。
+- `publish.test.ts` 中镜像用例：通过，确认推送标签为 `registry.internal:5000/...`，且缺端口时自动补 5000。
+- `compose-zones.test.ts`：2 个用例通过，确认三区端口策略并校验控制面挂载了 Docker 套接字。
 - 服务器手工构建 `platform-runtime-db-check:local` 并连接 `prd_runtime_check` 库运行：
   - `/health` 返回 `{"status":"ok","storage":"postgres",...}`；
   - 创建记录成功并返回 id；
@@ -88,14 +97,19 @@
   - 流程 `submit` 成功，`platform_workflows` 表有 1 行；
   - 记录表 `platform_records` 有 1 行；
   - 验证结束后删除容器和临时库。
+- 服务器用带宿主套接字和系统网络的临时容器构建一个空镜像并推送到 `registry.internal:5000`：
+  - Docker Server 27.5.1 可访问；
+  - 构建成功；
+  - 推送返回 manifest digest；
+  - 探针镜像随后从本地删除，并从镜像库删除 manifest。
 
 ## 后续顺序
 
 1. 接入区或节点代理把 `/p/<项目编码>` 路由到容器。
 2. 运行库接入身份与授权校验，让 `grants` 生效。
-3. 控制面通过节点代理构建镜像，或显式挂载 Docker 访问能力。
-4. 白盒测试执行器调用运行库接口，完成「生成 → 测试 → 发布」闭环。
-5. 公用容器组把组内项目模块合并进同一镜像。
+3. 白盒测试执行器调用运行库接口，完成「生成 → 测试 → 发布」闭环。
+4. 公用容器组把组内项目模块合并进同一镜像。
+5. 重新部署控制面，验证平台接口能完成一次真实构建、推送和发布。
 
 ## 代码位置
 
@@ -105,7 +119,11 @@
 - `platform/apps/control-plane/src/images.ts`
 - `platform/apps/control-plane/src/node-agent.ts`
 - `platform/apps/control-plane/src/node-install.ts`
+- `platform/apps/control-plane/Dockerfile`
+- `platform/deploy/compose.server.yaml`
 - `platform/apps/control-plane/test/runtime.test.mjs`
 - `platform/apps/control-plane/test/node-runtime.test.ts`
 - `platform/apps/control-plane/test/stage4-finish.test.ts`
+- `platform/apps/control-plane/test/publish.test.ts`
+- `platform/apps/control-plane/test/compose-zones.test.ts`
 - `platform/vitest.config.ts`
