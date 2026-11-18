@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { compileDesign } from "../src/compiler.js";
-import { imageDockerfile, readRuntimeFiles } from "../src/images.js";
+import { imageDockerfile, readRuntimeDependencies, readRuntimeFiles } from "../src/images.js";
+import { createPostgresStore } from "../src/runtime/index.mjs";
 import { startModules } from "../src/runtime/server.mjs";
 
 const design = {
@@ -66,6 +67,7 @@ describe("standard module runtime", () => {
     expect(health.status).toBe(200);
     const healthBody = await health.json();
     expect(healthBody.status).toBe("ok");
+    expect(healthBody.storage).toBe("memory");
     expect(healthBody.projects).toEqual([{ code: "qing-jia-shen-pi", entities: 1, workflows: 1 }]);
 
     const menus = await fetch(`${base}/api/qing-jia-shen-pi/menus`);
@@ -135,5 +137,65 @@ describe("standard module runtime", () => {
     const dockerfile = imageDockerfile();
     expect(dockerfile).toContain("COPY node_modules ./node_modules");
     expect(dockerfile).toContain('CMD ["node", "node_modules/@platform/runtime/server.mjs"]');
+  });
+
+  it("copies pg and its dependencies into the image", async () => {
+    const dependencies = await readRuntimeDependencies();
+    expect(dependencies["node_modules/pg/package.json"]).toContain('"name": "pg"');
+    expect(dependencies["node_modules/pg-pool/package.json"]).toContain('"name": "pg-pool"');
+    expect(dependencies["node_modules/pg-protocol/package.json"]).toContain('"name": "pg-protocol"');
+    expect(dependencies["node_modules/pg-types/package.json"]).toContain('"name": "pg-types"');
+    expect(Object.keys(dependencies).every((file) => file.startsWith("node_modules/"))).toBe(true);
+  });
+
+  it("keeps records and workflow positions in PostgreSQL through a fixed schema", async () => {
+    const records = [];
+    const workflows = new Map();
+    const queries = [];
+    const pool = {
+      async query(text, params = []) {
+        queries.push(text);
+        if (text.startsWith("insert into platform_records")) {
+          records.push({ entity: params[0], data: JSON.parse(params[2]) });
+          return { rows: [] };
+        }
+        if (text.startsWith("select data from platform_records")) {
+          return { rows: records.filter((row) => row.entity === params[0]) };
+        }
+        if (text.startsWith("delete from platform_records")) {
+          const index = records.findIndex((row) => row.entity === params[0] && row.data.id === params[1]);
+          if (index === -1) {
+            return { rows: [] };
+          }
+          records.splice(index, 1);
+          return { rows: [{ id: params[1] }] };
+        }
+        if (text.startsWith("select completed from platform_workflows")) {
+          return { rows: workflows.has(params[0]) ? [{ completed: workflows.get(params[0]) }] : [] };
+        }
+        if (text.startsWith("insert into platform_workflows")) {
+          const completed = (workflows.get(params[0]) ?? 0) + 1;
+          workflows.set(params[0], completed);
+          return { rows: [{ completed }] };
+        }
+        return { rows: [] };
+      },
+    };
+    const store = createPostgresStore(pool);
+    expect(store.kind).toBe("postgres");
+    await store.ensureSchema();
+    expect(queries.some((text) => text.includes("create table if not exists platform_records"))).toBe(true);
+
+    const record = await store.insert("qing-jia-shen-pi", "请假单", { 申请人: "tester" });
+    expect(record.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(await store.list("qing-jia-shen-pi", "请假单")).toEqual([record]);
+    expect(await store.list("qing-jia-shen-pi", "其他")).toEqual([]);
+
+    expect(await store.workflowPosition("qing-jia-shen-pi", "请假")).toBe(0);
+    expect(await store.advance("qing-jia-shen-pi", "请假")).toBe(0);
+    expect(await store.workflowPosition("qing-jia-shen-pi", "请假")).toBe(1);
+
+    expect(await store.remove("qing-jia-shen-pi", "请假单", record.id)).toBe(true);
+    expect(await store.remove("qing-jia-shen-pi", "请假单", record.id)).toBe(false);
   });
 });

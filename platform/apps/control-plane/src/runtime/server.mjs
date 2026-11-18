@@ -6,7 +6,7 @@ import { createServer } from "node:http";
 import { readdir } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { join, resolve } from "node:path";
-import { createApp } from "./index.mjs";
+import { createApp, connectPostgres } from "./index.mjs";
 
 const moduleFilePattern = /^module\.(ts|js|mjs)$/;
 
@@ -38,7 +38,9 @@ export async function startModules(options = {}) {
   const modulesDir = options.modulesDir ?? join(process.cwd(), "modules");
   const host = options.host ?? "0.0.0.0";
   const modules = await loadModules(modulesDir);
-  const app = createApp(modules);
+  const databaseUrl = options.databaseUrl ?? process.env.DATABASE_URL;
+  const database = databaseUrl ? await connectPostgres(databaseUrl) : undefined;
+  const app = createApp(modules, database?.store);
   const server = createServer((request, response) => {
     void app.handle(request, response);
   });
@@ -47,18 +49,31 @@ export async function startModules(options = {}) {
     server.listen(options.port ?? 8080, host, resolveListen);
   });
   const address = server.address();
-  return { server, port: typeof address === "object" && address ? address.port : options.port ?? 8080, modules };
+  return {
+    server,
+    port: typeof address === "object" && address ? address.port : options.port ?? 8080,
+    modules,
+    storage: app.store.kind,
+    closeDatabase: database ? () => database.pool.end() : undefined,
+  };
 }
 
 const isEntry = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (isEntry) {
   const port = Number(process.env.PORT ?? "8080");
-  const { port: actualPort, modules, server } = await startModules({ port });
+  const { port: actualPort, modules, server, storage, closeDatabase } = await startModules({ port });
   const mode = process.env["runtime.mode"] ?? "prod";
-  console.log(`平台运行库已启动：端口 ${actualPort}，模式 ${mode}，模块 ${modules.map((item) => item.projectCode).join(",")}`);
+  console.log(
+    `平台运行库已启动：端口 ${actualPort}，模式 ${mode}，存储 ${storage}，模块 ${modules.map((item) => item.projectCode).join(",")}`,
+  );
   const shutdown = () => {
-    server.close(() => process.exit(0));
+    server.close(() => {
+      void closeDatabase?.().finally(() => process.exit(0));
+      if (!closeDatabase) {
+        process.exit(0);
+      }
+    });
   };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);

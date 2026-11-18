@@ -162,10 +162,11 @@ export function createStore() {
   const workflowPositions = new Map();
 
   return {
-    list(projectCode, entityName) {
+    kind: "memory",
+    async list(projectCode, entityName) {
       return records.get(`${projectCode}:${entityName}`) ?? [];
     },
-    insert(projectCode, entityName, values) {
+    async insert(projectCode, entityName, values) {
       const key = `${projectCode}:${entityName}`;
       const list = records.get(key) ?? [];
       const record = { id: crypto.randomUUID(), ...values, createdAt: new Date().toISOString() };
@@ -173,17 +174,17 @@ export function createStore() {
       records.set(key, list);
       return record;
     },
-    remove(projectCode, entityName, id) {
+    async remove(projectCode, entityName, id) {
       const key = `${projectCode}:${entityName}`;
       const list = records.get(key) ?? [];
       const next = list.filter((record) => record.id !== id);
       records.set(key, next);
       return next.length !== list.length;
     },
-    workflowPosition(projectCode, workflowName) {
+    async workflowPosition(projectCode, workflowName) {
       return workflowPositions.get(`${projectCode}:${workflowName}`) ?? 0;
     },
-    advance(projectCode, workflowName, step) {
+    async advance(projectCode, workflowName, step) {
       const key = `${projectCode}:${workflowName}`;
       const position = workflowPositions.get(key) ?? 0;
       workflowPositions.set(key, position + 1);
@@ -192,16 +193,86 @@ export function createStore() {
   };
 }
 
-export function createApp(modules) {
+/**
+ * PostgreSQL 存储：每个项目使用自己的库，表结构固定，实体名作为常量列保存，
+ * 因此新增实体不需要做 DDL。记录体存 jsonb，便于按设计字段原样读回。
+ */
+export function createPostgresStore(pool) {
+  return {
+    kind: "postgres",
+    async ensureSchema() {
+      await pool.query(
+        `create table if not exists platform_records (
+           entity text not null,
+           id uuid primary key,
+           data jsonb not null,
+           created_at timestamptz not null default now()
+         )`,
+      );
+      await pool.query(
+        `create table if not exists platform_workflows (
+           workflow text primary key,
+           completed integer not null default 0
+         )`,
+      );
+    },
+    async list(_projectCode, entityName) {
+      const result = await pool.query(
+        "select data from platform_records where entity = $1 order by created_at, id",
+        [entityName],
+      );
+      return result.rows.map((row) => row.data);
+    },
+    async insert(_projectCode, entityName, values) {
+      const record = { id: crypto.randomUUID(), ...values, createdAt: new Date().toISOString() };
+      await pool.query(
+        "insert into platform_records (entity, id, data) values ($1, $2, $3::jsonb)",
+        [entityName, record.id, JSON.stringify(record)],
+      );
+      return record;
+    },
+    async remove(_projectCode, entityName, id) {
+      const result = await pool.query(
+        "delete from platform_records where entity = $1 and id = $2 returning id",
+        [entityName, id],
+      );
+      return result.rows.length > 0;
+    },
+    async workflowPosition(_projectCode, workflowName) {
+      const result = await pool.query("select completed from platform_workflows where workflow = $1", [workflowName]);
+      return result.rows[0]?.completed ?? 0;
+    },
+    async advance(_projectCode, workflowName) {
+      const result = await pool.query(
+        `insert into platform_workflows (workflow, completed) values ($1, 1)
+         on conflict (workflow) do update set completed = platform_workflows.completed + 1
+         returning completed`,
+        [workflowName],
+      );
+      return result.rows[0].completed - 1;
+    },
+  };
+}
+
+export async function connectPostgres(databaseUrl) {
+  const { default: pg } = await import("pg");
+  const pool = new pg.Pool({ connectionString: databaseUrl, max: 4 });
+  await pool.query("select 1");
+  const store = createPostgresStore(pool);
+  await store.ensureSchema();
+  return { store, pool };
+}
+
+export function createApp(modules, store) {
   const byCode = new Map(modules.map((module) => [module.projectCode, module]));
-  const store = createStore();
+  const activeStore = store ?? createStore();
 
   return {
     modules: byCode,
-    store,
+    store: activeStore,
     async handle(request, response) {
       try {
-        await route(request, response, byCode, store);
+        await route(request, response, byCode, activeStore);
       } catch (error) {
         sendJson(response, 500, { reason: error instanceof Error ? error.message : "运行库内部错误" });
       }
@@ -221,6 +292,7 @@ async function route(request, response, modules, store) {
     return sendJson(response, 200, {
       status: "ok",
       mode: process.env["runtime.mode"] ?? "prod",
+      storage: store.kind,
       projects: [...modules.values()].map((module) => ({
         code: module.projectCode,
         entities: module.entities.length,
@@ -256,12 +328,12 @@ async function apiRoute(request, response, method, parts, modules, store) {
       return sendJson(response, 404, { reason: `流程不存在：${name}` });
     }
     if (rest.length === 2 && method === "GET") {
-      const position = store.workflowPosition(code, name);
+      const position = await store.workflowPosition(code, name);
       return sendJson(response, 200, { name, steps: workflow.steps, completed: position });
     }
     if (rest.length === 3 && method === "POST") {
       const step = decodeURIComponent(rest[2]);
-      const position = store.workflowPosition(code, name);
+      const position = await store.workflowPosition(code, name);
       const expected = workflow.steps[position];
       if (!expected) {
         return sendJson(response, 409, { reason: "流程已完成" });
@@ -269,7 +341,7 @@ async function apiRoute(request, response, method, parts, modules, store) {
       if (step !== expected) {
         return sendJson(response, 409, { reason: `流程步骤顺序不符，期望 ${expected}` });
       }
-      store.advance(code, name, step);
+      await store.advance(code, name, step);
       return sendJson(response, 200, { name, step, completed: position + 1 });
     }
     return sendJson(response, 405, { reason: "方法不支持" });
@@ -282,7 +354,7 @@ async function apiRoute(request, response, method, parts, modules, store) {
   }
 
   if (rest.length === 1 && method === "GET") {
-    return sendJson(response, 200, { records: store.list(code, entity.name) });
+    return sendJson(response, 200, { records: await store.list(code, entity.name) });
   }
   if (rest.length === 1 && method === "POST") {
     const body = await readJson(request);
@@ -293,11 +365,11 @@ async function apiRoute(request, response, method, parts, modules, store) {
     if (checked.reason) {
       return sendJson(response, 400, { reason: checked.reason });
     }
-    const record = store.insert(code, entity.name, checked.values);
+    const record = await store.insert(code, entity.name, checked.values);
     return sendJson(response, 201, { record });
   }
   if (rest.length === 2 && method === "DELETE") {
-    const removed = store.remove(code, entity.name, decodeURIComponent(rest[1]));
+    const removed = await store.remove(code, entity.name, decodeURIComponent(rest[1]));
     return removed
       ? sendJson(response, 200, { removed: true })
       : sendJson(response, 404, { reason: "记录不存在" });
@@ -319,7 +391,7 @@ async function pageRoute(request, response, method, parts, modules, store) {
   const suffix = parts[3];
 
   if (!suffix && method === "GET") {
-    const records = store.list(code, entity.name);
+    const records = await store.list(code, entity.name);
     return sendHtml(response, 200, listPage(module, entity, records));
   }
   if (suffix === "form" && method === "GET") {
@@ -331,7 +403,7 @@ async function pageRoute(request, response, method, parts, modules, store) {
     if (checked.reason) {
       return sendHtml(response, 400, formPage(module, entity, checked.reason));
     }
-    store.insert(code, entity.name, checked.values);
+    await store.insert(code, entity.name, checked.values);
     response.writeHead(303, { location: `/p/${encodeURIComponent(code)}/${encodeURIComponent(entity.name)}?created=1` });
     return response.end();
   }

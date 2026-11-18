@@ -54,29 +54,70 @@ ${input.caCertificate}
 CA
 cat > "$dir/agent.mjs" <<'AGENT'
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 const nodeName = process.env.PLATFORM_NODE_NAME;
 const base = process.env.PLATFORM_CONTROL_PLANE_URL;
 const token = process.env.PLATFORM_NODE_TOKEN;
-async function request(path, init = {}) {
-  const response = await fetch(base + path, {
-    ...init,
-    headers: { authorization: "Bearer " + token, ...(init.headers || {}) },
+const nodeDir = process.env.PLATFORM_NODE_DIR || "/root/.platform-node";
+const healthScript = "fetch('http://127.0.0.1:8080/health').then(function (r) { return r.json(); }).then(function (j) { console.log(JSON.stringify(j)); }).catch(function () { process.exit(1); })";
+function request(path, init = {}) {
+  const options = Object.assign({}, init, {
+    headers: Object.assign({ authorization: "Bearer " + token }, init.headers || {}),
   });
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
-  return response.headers.get("content-type")?.includes("json") ? response.json() : response.text();
+  return fetch(base + path, options).then(function (response) {
+    if (!response.ok) {
+      return response.text().then(function (text) { throw new Error(text); });
+    }
+    return response.headers.get("content-type") && response.headers.get("content-type").indexOf("json") !== -1
+      ? response.json()
+      : response.text();
+  });
 }
 function docker(args) {
-  return new Promise((resolve) => {
+  return new Promise(function (resolve) {
     const child = spawn("docker", args, { windowsHide: true });
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (chunk) => { stdout += chunk; });
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
-    child.on("error", (error) => resolve({ code: 1, stderr: error.message, stdout }));
-    child.on("close", (code) => resolve({ code: code ?? 1, stderr, stdout }));
+    child.stdout.on("data", function (chunk) { stdout += chunk; });
+    child.stderr.on("data", function (chunk) { stderr += chunk; });
+    child.on("error", function (error) { resolve({ code: 1, stderr: error.message, stdout: stdout }); });
+    child.on("close", function (code) { resolve({ code: code === null ? 1 : code, stderr: stderr, stdout: stdout }); });
   });
+}
+function databaseUrlTemplate() {
+  if (process.env.PLATFORM_DATABASE_URL_TEMPLATE) {
+    return process.env.PLATFORM_DATABASE_URL_TEMPLATE;
+  }
+  try {
+    return readFileSync(nodeDir + "/database.url", "utf8").trim();
+  } catch (_) {
+    return "";
+  }
+}
+function databaseUrl(databaseName) {
+  const template = databaseUrlTemplate();
+  if (!template) {
+    return "";
+  }
+  return template.indexOf("{database}") === -1 ? template : template.split("{database}").join(databaseName);
+}
+function containerHealth(code) {
+  let attempt = 0;
+  function next() {
+    return docker(["exec", "platform-" + code, "node", "-e", healthScript]).then(function (result) {
+      if (result.code === 0) {
+        try {
+          return JSON.parse(result.stdout.trim());
+        } catch (_) {}
+      }
+      attempt += 1;
+      if (attempt >= 20) {
+        return undefined;
+      }
+      return new Promise(function (resolve) { setTimeout(resolve, 1500); }).then(next);
+    });
+  }
+  return next();
 }
 async function cycle() {
   const desired = await request("/api/nodes/" + nodeName + "/desired");
@@ -88,18 +129,32 @@ async function cycle() {
       continue;
     }
     await docker(["rm", "-f", "platform-" + item.code]);
-    const started = await docker(["run", "-d", "--name", "platform-" + item.code, "-e", "DATABASE_NAME=" + item.databaseName, "-e", "runtime.mode=prod", item.imageDigest]);
+    const args = ["run", "-d", "--name", "platform-" + item.code, "-e", "DATABASE_NAME=" + item.databaseName, "-e", "runtime.mode=prod"];
+    const url = databaseUrl(item.databaseName);
+    if (url) {
+      args.push("-e", "DATABASE_URL=" + url);
+    }
+    args.push(item.imageDigest);
+    const started = await docker(args);
     if (started.code !== 0) {
       projects.push({ code: item.code, running: false, databaseConnected: false, imageDigest: item.imageDigest, reason: (started.stderr || started.stdout || "容器启动失败").trim() });
       continue;
     }
-    projects.push({ code: item.code, running: true, databaseConnected: true, imageDigest: item.imageDigest });
+    const health = await containerHealth(item.code);
+    const connected = Boolean(health && health.storage === "postgres");
+    projects.push({
+      code: item.code,
+      running: true,
+      databaseConnected: connected,
+      imageDigest: item.imageDigest,
+      reason: connected ? undefined : "运行库未连接项目数据库",
+    });
   }
-  await request("/api/nodes/" + nodeName + "/health", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projects }) });
+  await request("/api/nodes/" + nodeName + "/health", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projects: projects }) });
 }
 while (true) {
   try { await cycle(); } catch (_) {}
-  await new Promise((resolve) => setTimeout(resolve, 30000));
+  await new Promise(function (resolve) { setTimeout(resolve, 30000); });
 }
 AGENT
 export PLATFORM_NODE_NAME="$node_name"
@@ -107,6 +162,8 @@ export PLATFORM_CONTROL_PLANE_URL="$base"
 export PLATFORM_NODE_TOKEN="$token"
 export PLATFORM_NODE_DIR="$dir"
 # mTLS material: client.crt client.key ca.crt
+# 项目数据库连接串放在本机 $dir/database.url，用 {database} 占位数据库名；
+# 也可以用 PLATFORM_DATABASE_URL_TEMPLATE 覆盖。安装脚本不写数据库地址。
 exec node "$dir/agent.mjs"
 `;
 }
