@@ -1,6 +1,7 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
 export type CommandResult = { code: number; stderr: string; stdout: string };
@@ -14,6 +15,35 @@ export type ImageBuildInput = {
 };
 
 const digestPattern = /^sha256:[a-f0-9]{64}$/;
+const runtimeAssets = ["package.json", "index.mjs", "server.mjs"] as const;
+
+/**
+ * 运行库随镜像一起发布：生成的模块 import "@platform/runtime"，
+ * 镜像里要有对应的 node_modules 目录才能启动。
+ */
+export async function readRuntimeFiles(): Promise<Record<string, string>> {
+  const entries = await Promise.all(
+    runtimeAssets.map(
+      async (name) => [name, await readFile(fileURLToPath(new URL(name, new URL("./runtime/", import.meta.url))), "utf8")] as const,
+    ),
+  );
+  return Object.fromEntries(
+    entries.map(([name, content]) => [`node_modules/@platform/runtime/${name}`, content]),
+  );
+}
+
+export function imageDockerfile(): string {
+  return [
+    "FROM node:24-bookworm-slim",
+    "WORKDIR /app",
+    "COPY node_modules ./node_modules",
+    "COPY modules ./modules",
+    "ENV PORT=8080",
+    "EXPOSE 8080",
+    'CMD ["node", "node_modules/@platform/runtime/server.mjs"]',
+    "",
+  ].join("\n");
+}
 
 export function projectDatabaseName(prefix: "prd" | "tst", projectCode: string): string {
   const room = 63 - prefix.length - 1;
@@ -26,12 +56,13 @@ export async function runDockerBuild(
 ): Promise<{ digest: string } | { reason: string }> {
   const directory = await mkdtemp(join(tmpdir(), "platform-image-"));
   try {
-    for (const [file, content] of Object.entries(input.files)) {
+    const files = { ...(await readRuntimeFiles()), ...input.files };
+    for (const [file, content] of Object.entries(files)) {
       const target = join(directory, ...file.split("/"));
       await mkdir(join(target, ".."), { recursive: true });
       await writeFile(target, content);
     }
-    await writeFile(join(directory, "Dockerfile"), "FROM node:24-bookworm-slim\nWORKDIR /app\nCOPY modules ./modules\n");
+    await writeFile(join(directory, "Dockerfile"), imageDockerfile());
     const tag = `${input.registry}/${input.projectCode}:${input.sourceRevision.replace(/^sha256:/, "").slice(0, 12)}`;
     const result = await runner(["build", "-q", "-t", tag, directory]);
     if (result.code !== 0) {

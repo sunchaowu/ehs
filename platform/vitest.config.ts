@@ -22,6 +22,13 @@ export default defineConfig({
           setupFiles: ["apps/portal/src/test-setup.ts"],
         },
       },
+      {
+        test: {
+          name: "runtime",
+          include: ["apps/control-plane/test/runtime.test.mjs"],
+          environment: "node",
+        },
+      },
     ],
   },
 });
