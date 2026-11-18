@@ -3,7 +3,7 @@
 | 项 | 值 |
 |---|---|
 | 文档时间 | 2026-11-06 10:21:13 +0800 |
-| 进度时间 | 2026-11-18 09:15:00 +0800 |
+| 进度时间 | 2026-11-18 10:20:00 +0800 |
 | 阶段 | 需求已确认。第 1~4 项与插件机制已完成并部署；第 5 项编排完成、执行器待接入；第 6 项有 OA 模板种子；第 7、8 项尚未开始 |
 | 行为细则 | `docs/superpowers/specs/2026-11-04-enterprise-harness-platform-design.md` |
 | 已暂停的实施计划 | `docs/superpowers/plans/2026-11-05-system-zone-portal-accounts.md` |
@@ -265,14 +265,14 @@ Midscene 的模型地址使用 `model.baseUrl`，不在测试代码里写死服�
 
 实现原则是先搭骨架，再按阶段补充内容和开源构件。第一份可执行计划是 `docs/superpowers/plans/2026-11-06-platform-skeleton.md`。骨架跑起来之后，再分别写账号、OpenSpec 草稿、生成发布、Midscene 测试、OA 内容、运维组件和 vLLM。`docs/superpowers/plans/2026-11-05-system-zone-portal-accounts.md` 停止使用。
 
-进度核对时间：2026-11-18 09:15:00 +0800。对照本节 8 项清单：第 1 到第 4 项、插件机制和在线测试编排已完成，相关提交在 `platform-skeleton` 分支。第 1~4 项覆盖骨架、账号与系统配置、项目会话与草稿、设计编译与镜像推送、节点安装与证书、节点代理拉取并更新容器、公用容器组重建与通知、发布取消和发布确认摘要。生成镜像现已内置 `@platform/runtime`：模块进程可启动，提供健康检查、菜单、实体增删查、流程迁移和表单页面，字段类型、未知字段和流程顺序都会校验；记录暂存内存，节点侧数据库注入、访问路由和授权校验尚未补齐。第 5 项的控制面编排已经实现：从设计生成黑盒/白盒案例、校验用户案例、创建运行记录与步骤记录、失败案例回放、候选镜像发布门，以及门户测试结果卡片；真实执行器（Midscene.js + Playwright 黑盒、Vitest 白盒）尚未接入，`defaultTestExecutor()` 明确返回「测试执行器未配置」，因此当前所有运行都会失败，发布门保持关闭。第 6 项只有 `oa-template.ts` 的菜单、实体、请假流程、角色授权与案例模板，以及 `POST /api/projects/:code/apply-template`，还没有独立的 OA 领域运行时。第 7、8 项尚未开始，只有 `slots.ts` 的组件占位和模型配置页三个配置键。门户还没有用户管理与通知页面；控制面容器内没有 Docker CLI 和套接字，平台接口里的镜像构建在部署环境仍无法真正执行。插件机制记录见 `docs/superpowers/plans/2026-11-12-plugins.md`，在线测试记录见 `docs/superpowers/plans/2026-11-17-online-testing.md`，运行库记录见 `docs/superpowers/plans/2026-11-18-module-runtime.md`。测试与发布验证在局域网 Ubuntu 环境完成；2026-11-18 本地核对：`tsc` 通过，门户测试 19 个、运行库测试 3 个全部通过，控制面测试（24 个文件、48 个用例）需要 PostgreSQL，本机未启动数据库，未执行。
+进度核对时间：2026-11-18 10:20:00 +0800。对照本节 8 项清单：第 1 到第 4 项、插件机制和在线测试编排已完成，相关提交在 `platform-skeleton` 分支。第 1~4 项覆盖骨架、账号与系统配置、项目会话与草稿、设计编译与镜像推送、节点安装与证书、节点代理拉取并更新容器、公用容器组重建与通知、发布取消和发布确认摘要。生成镜像现已内置 `@platform/runtime`：模块进程可启动，提供健康检查、菜单、实体增删查、流程迁移和表单页面，字段类型、未知字段和流程顺序都会校验；存在 `DATABASE_URL` 时记录与流程位置落到 PostgreSQL 固定表，节点代理从本机模板注入连接串，并读取容器 `/health` 的 `storage` 判断是否连库；访问路由、授权校验和平台侧镜像构建尚未补齐。第 5 项的控制面编排已经实现：从设计生成黑盒/白盒案例、校验用户案例、创建运行记录与步骤记录、失败案例回放、候选镜像发布门，以及门户测试结果卡片；真实执行器（Midscene.js + Playwright 黑盒、Vitest 白盒）尚未接入，`defaultTestExecutor()` 明确返回「测试执行器未配置」，因此当前所有运行都会失败，发布门保持关闭。第 6 项只有 `oa-template.ts` 的菜单、实体、请假流程、角色授权与案例模板，以及 `POST /api/projects/:code/apply-template`，还没有独立的 OA 领域运行时。第 7、8 项尚未开始，只有 `slots.ts` 的组件占位和模型配置页三个配置键。门户还没有用户管理与通知页面；控制面容器内没有 Docker CLI 和套接字，平台接口里的镜像构建在部署环境仍无法真正执行。插件机制记录见 `docs/superpowers/plans/2026-11-12-plugins.md`，在线测试记录见 `docs/superpowers/plans/2026-11-17-online-testing.md`，运行库记录见 `docs/superpowers/plans/2026-11-18-module-runtime.md`。测试与发布验证在局域网 Ubuntu 环境完成；2026-11-18 本地核对：`tsc` 通过，门户测试 19 个、运行库测试 5 个、节点运行测试 5 个全部通过，控制面其余测试需要 PostgreSQL，本机未启动数据库，未执行。
 
 | 顺序 | 计划 | 状态 | 核对结果 |
 |---|---|---|---|
 | 1 | 平台骨架 | ✅ 已完成 | 分支 `platform-skeleton`，骨架提交至 `0ae926a`。后续账号提交也在同一分支 |
 | 2 | 账号与系统配置 | ✅ 已完成 | 计划 `docs/superpowers/plans/2026-11-11-accounts-system-config.md`。2026-11-11 09:39:55 全量测试 12 个文件、22 个测试通过。提交 `c67e8d6`。完成安装管理员、密码登录、微信未配置时不显示扫码，以及管理员配置入口 |
 | 3 | 方案与会话 | ✅ 已完成 | 计划 `docs/superpowers/plans/2026-11-11-projects-sessions.md`。项目编码、共享草稿、会话隔离、授权并集和未发布菜单已覆盖。随提交 `750b4ff` 提交。正式发布、编译和项目镜像不在本阶段。其后本地门户补充了工作台布局、语言切换、导航折叠、窄屏和模型未配置提醒，这些也不改变本阶段边界 |
-| 4 | 生成与发布 | ✅ 已完成 | 记录 `docs/superpowers/plans/2026-11-11-generate-publish.md`。已实现设计编译、镜像推送、节点安装脚本与证书、代理协调、公用容器组重建与通知、发布取消和发布确认摘要。在线测试执行不在本阶段。生成镜像已内置 `@platform/runtime`（记录 `docs/superpowers/plans/2026-11-18-module-runtime.md`），可启动并提供标准接口；数据库注入、访问路由与授权校验待补 |
+| 4 | 生成与发布 | ✅ 已完成 | 记录 `docs/superpowers/plans/2026-11-11-generate-publish.md`。已实现设计编译、镜像推送、节点安装脚本与证书、代理协调、公用容器组重建与通知、发布取消和发布确认摘要。在线测试执行不在本阶段。生成镜像已内置 `@platform/runtime` 与 `pg`（记录 `docs/superpowers/plans/2026-11-18-module-runtime.md`），可启动并按 `DATABASE_URL` 持久化；访问路由、授权校验与平台侧镜像构建待补 |
 | 5 | 在线测试 | 🟡 编排完成 | 记录 `docs/superpowers/plans/2026-11-17-online-testing.md`，源码随 `b835786` 进入仓库。案例生成、用户案例校验、运行与步骤记录、失败回放、发布门、门户测试卡片已实现；Midscene.js 黑盒与 Vitest 白盒执行器待接入，默认执行器明确失败，不产生虚假通过记录 |
 | 6 | OA 内容 | 🟡 模板种子 | `platform/apps/control-plane/src/oa-template.ts` 提供菜单、实体、请假流程、授权与案例模板，可经 `apply-template` 写入草稿；独立领域运行时尚待补充 |
 | 7 | 运维 | ⬜ 未开始 | 仅有 `slots.ts` 占位（OpenTelemetry、Prometheus、VictoriaLogs、HolmesGPT） |

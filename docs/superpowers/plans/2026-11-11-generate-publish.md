@@ -49,5 +49,5 @@
 
 ## 2026-11-18 补充核对
 
-- 最小运行库已实现并随镜像发布，记录见 `docs/superpowers/plans/2026-11-18-module-runtime.md`。生成镜像现在包含 `node_modules/@platform/runtime` 和启动命令，容器可提供 `/health`、菜单、实体、流程与表单接口。数据库注入、入口路由和授权校验仍未接；控制面容器内没有 Docker CLI 和套接字，平台接口触发的镜像构建在部署环境仍无法执行。
+- 最小运行库已实现并随镜像发布，记录见 `docs/superpowers/plans/2026-11-18-module-runtime.md`。生成镜像现在包含 `node_modules/@platform/runtime`、`pg` 依赖和启动命令，容器可提供 `/health`、菜单、实体、流程与表单接口；存在 `DATABASE_URL` 时记录落到项目库，节点代理从本机模板注入连接串并读取容器健康状态。入口路由、授权校验仍未接；控制面容器内没有 Docker CLI 和套接字，平台接口触发的镜像构建在部署环境仍无法执行。
 
