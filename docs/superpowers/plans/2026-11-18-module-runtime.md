@@ -57,6 +57,7 @@
 
 - `apps/control-plane/Dockerfile` 用 `docker:27-cli` 多阶段复制 Docker CLI 到运行镜像；`deploy/compose.server.yaml` 给控制面挂载 `/var/run/docker.sock`。
 - 挂载套接字等同宿主 root 权限，只部署在受控的运行区服务器，不放到接入区。
+- 设计原文要求 Docker 套接字只在节点本机；当前是在系统运行区服务器本地挂载，不跨区。若后续严格按该条执行，需要改成受控构建服务或专用构建节点，不影响当前部署边界。
 - `registry.address` 常写成 `registry.internal`，构建标签会自动补默认端口 5000，避免推送到 443。
 - 部署 compose 后，`POST /api/projects/:code/image` 可在控制面容器内真正执行构建和推送；当前运行实例仍是 2026-11-17 的镜像，需要重新部署才生效。
 
