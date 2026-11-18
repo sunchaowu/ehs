@@ -50,6 +50,10 @@ services:
       REGISTRY_ADDRESS: ${REGISTRY_ADDRESS}
       # 默认不重置管理员密码；只有显式设置 ADMIN_RESET=1 才会重置。
       ADMIN_RESET: ${ADMIN_RESET:-}
+    # 平台接口触发的镜像构建需要宿主 Docker。挂载套接字等同宿主 root 权限，
+    # 只允许部署在受控的运行区服务器，不放到接入区。
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
   portal:
     build:
       context: ../apps/portal

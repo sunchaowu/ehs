@@ -144,6 +144,18 @@ export function projectDatabaseName(prefix: "prd" | "tst", projectCode: string):
   return `${prefix}_${projectCode.slice(0, room)}`;
 }
 
+/**
+ * 部署里的私有镜像库监听 5000，但 `registry.address` 常被写成
+ * `registry.internal`。少了端口时 docker push 会落到 443，补上默认端口。
+ */
+export function registryWithPort(registry: string): string {
+  const host = registry.split("/")[0] ?? "";
+  if (!host || host.includes(":") || registry.includes("://")) {
+    return registry;
+  }
+  return `${host}:5000${registry.slice(host.length)}`;
+}
+
 export async function runDockerBuild(
   runner: CommandRunner,
   input: ImageBuildInput,
@@ -157,7 +169,7 @@ export async function runDockerBuild(
       await writeFile(target, content);
     }
     await writeFile(join(directory, "Dockerfile"), imageDockerfile());
-    const tag = `${input.registry}/${input.projectCode}:${input.sourceRevision.replace(/^sha256:/, "").slice(0, 12)}`;
+    const tag = `${registryWithPort(input.registry)}/${input.projectCode}:${input.sourceRevision.replace(/^sha256:/, "").slice(0, 12)}`;
     const result = await runner(["build", "-q", "-t", tag, directory]);
     if (result.code !== 0) {
       return { reason: result.stderr.trim() || result.stdout.trim() || "镜像构建失败" };

@@ -1,6 +1,10 @@
+FROM docker:27-cli AS docker-cli
+
 FROM node:24-bookworm-slim
 WORKDIR /app
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+# 镜像构建由控制面发起：带 Docker CLI，运行时挂载宿主 /var/run/docker.sock。
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 RUN --mount=type=cache,id=corepack,target=/root/.cache/node/corepack \
     corepack enable && corepack prepare pnpm@10.22.0 --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { openDatabase } from "../src/database.js";
-import { projectDatabaseName, runDockerBuild } from "../src/images.js";
+import { projectDatabaseName, registryWithPort, runDockerBuild } from "../src/images.js";
 import { installInitialAdmin } from "../src/install-admin.js";
 import { buildServer } from "../src/server.js";
 
@@ -30,6 +30,10 @@ describe("image digest and database name", () => {
     });
     expect(built).toEqual({ digest });
     expect(commands.map((command) => command[0])).toEqual(["build", "push"]);
+    expect(commands[1]?.join(" ")).toContain(`registry.internal:5000/qing-jia-shen-pi:`);
+    expect(registryWithPort("registry.internal:5000")).toBe("registry.internal:5000");
+    expect(registryWithPort("localhost:5001/team")).toBe("localhost:5001/team");
+    expect(registryWithPort("registry.internal/team")).toBe("registry.internal:5000/team");
     const rejected = await runDockerBuild(async (args) => {
       if (args[0] === "push") {
         return { code: 1, stderr: "镜像库拒绝推送", stdout: "" };

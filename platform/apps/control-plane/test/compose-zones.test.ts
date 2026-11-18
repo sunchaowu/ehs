@@ -8,4 +8,9 @@ describe("zone policy", () => {
     expect(policy.publishedPorts).toEqual(["443:443"]);
     expect(policy.isolatedPairs).toBe(true);
   });
+
+  it("gives the control plane docker access for image builds", () => {
+    const server = readFileSync(new URL("../../../deploy/compose.server.yaml", import.meta.url), "utf8");
+    expect(server).toContain("/var/run/docker.sock:/var/run/docker.sock");
+  });
 });
