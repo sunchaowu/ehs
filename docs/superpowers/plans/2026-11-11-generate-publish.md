@@ -47,3 +47,7 @@
 
 - 管线本身已按上述行为实现并部署，但生成产物还缺少运行时：`compiler.ts` 生成的模块引用 `@platform/runtime` 的 `createStandardModule`，仓库中尚无该包；`images.ts` 生成的 Dockerfile 只复制 `modules/`，没有依赖安装和启动命令；节点启动容器时也未传入口命令。因此当前发布出的镜像不能提供业务服务，接入运行时应作为后续独立事项，不改变本阶段的管线边界。
 
+## 2026-11-18 补充核对
+
+- 最小运行库已实现并随镜像发布，记录见 `docs/superpowers/plans/2026-11-18-module-runtime.md`。生成镜像现在包含 `node_modules/@platform/runtime` 和启动命令，容器可提供 `/health`、菜单、实体、流程与表单接口。数据库注入、入口路由和授权校验仍未接；控制面容器内没有 Docker CLI 和套接字，平台接口触发的镜像构建在部署环境仍无法执行。
+
