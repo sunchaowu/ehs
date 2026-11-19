@@ -309,6 +309,40 @@ async function route(request, response, modules, store) {
   return sendJson(response, 404, { reason: "路径不存在" });
 }
 
+function principalFrom(request) {
+  const header = (name) => {
+    const value = request.headers[name];
+    return Array.isArray(value) ? value.join(",") : String(value ?? "");
+  };
+  return {
+    user: decodeHeader(header("x-platform-user")).trim(),
+    roles: decodeHeader(header("x-platform-roles"))
+      .split(",")
+      .map((role) => role.trim())
+      .filter(Boolean),
+  };
+}
+
+/** 请求头只能放 ASCII，中文用户名和角色按 encodeURIComponent 编码。 */
+function decodeHeader(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/** 菜单可见需要「访问」授权；角色和用户授权取并集。 */
+function menuAllowed(module, menuCode, principal) {
+  return module.grants.some(
+    (grant) =>
+      grant.menuCode === menuCode &&
+      grant.action === "访问" &&
+      ((grant.principalType === "user" && grant.principalName === principal.user) ||
+        (grant.principalType === "role" && principal.roles.includes(grant.principalName))),
+  );
+}
+
 async function apiRoute(request, response, method, parts, modules, store) {
   const code = parts[1];
   const module = modules.get(code);
@@ -317,8 +351,26 @@ async function apiRoute(request, response, method, parts, modules, store) {
   }
   const rest = parts.slice(2);
 
-  if (rest[0] === "menus" && rest.length === 1 && method === "GET") {
-    return sendJson(response, 200, { menus: module.menus });
+  if (rest[0] === "menus" && method === "GET") {
+    const principal = principalFrom(request);
+    if (!principal.user && principal.roles.length === 0) {
+      return sendJson(response, 401, { reason: "缺少用户身份" });
+    }
+    if (rest.length === 1) {
+      return sendJson(response, 200, { menus: module.menus.filter((menu) => menuAllowed(module, menu.code, principal)) });
+    }
+    if (rest.length === 2) {
+      const menuCode = decodeURIComponent(rest[1]);
+      const menu = module.menus.find((item) => item.code === menuCode);
+      if (!menu) {
+        return sendJson(response, 404, { reason: `菜单不存在：${menuCode}` });
+      }
+      if (!menuAllowed(module, menu.code, principal)) {
+        return sendJson(response, 403, { reason: "未授权访问" });
+      }
+      return sendJson(response, 200, { menu });
+    }
+    return sendJson(response, 405, { reason: "方法不支持" });
   }
 
   if (rest[0] === "workflows" && rest.length >= 2) {

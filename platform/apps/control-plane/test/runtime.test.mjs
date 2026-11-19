@@ -11,7 +11,10 @@ const design = {
   projectCode: "qing-jia-shen-pi",
   containerGroup: "qing-jia-shen-pi",
   menus: [{ code: "qing-jia-dan", name: "请假单", parentCode: null, sort: 1 }],
-  grants: [{ principalType: "user", principalName: "employee", menuCode: "qing-jia-dan", action: "访问" }],
+  grants: [
+    { principalType: "user", principalName: "employee", menuCode: "qing-jia-dan", action: "访问" },
+    { principalType: "role", principalName: "员工", menuCode: "qing-jia-dan", action: "访问" },
+  ],
   entities: [
     {
       name: "请假单",
@@ -70,10 +73,39 @@ describe("standard module runtime", () => {
     expect(healthBody.storage).toBe("memory");
     expect(healthBody.projects).toEqual([{ code: "qing-jia-shen-pi", entities: 1, workflows: 1 }]);
 
-    const menus = await fetch(`${base}/api/qing-jia-shen-pi/menus`);
+    const menus = await fetch(`${base}/api/qing-jia-shen-pi/menus`, {
+      headers: { "x-platform-user": "employee" },
+    });
     expect((await menus.json()).menus).toEqual([
       { code: "qing-jia-dan", name: "请假单", parentCode: null, sort: 1 },
     ]);
+
+    const anonymous = await fetch(`${base}/api/qing-jia-shen-pi/menus`);
+    expect(anonymous.status).toBe(401);
+
+    const otherRole = await fetch(`${base}/api/qing-jia-shen-pi/menus`, {
+      headers: { "x-platform-roles": encodeURIComponent("访客") },
+    });
+    expect(otherRole.status).toBe(200);
+    expect((await otherRole.json()).menus).toEqual([]);
+
+    const grantedRole = await fetch(`${base}/api/qing-jia-shen-pi/menus`, {
+      headers: { "x-platform-roles": encodeURIComponent("员工") },
+    });
+    expect(grantedRole.status).toBe(200);
+    expect((await grantedRole.json()).menus).toHaveLength(1);
+
+    const deniedMenu = await fetch(`${base}/api/qing-jia-shen-pi/menus/qing-jia-dan`, {
+      headers: { "x-platform-user": "other" },
+    });
+    expect(deniedMenu.status).toBe(403);
+    expect((await deniedMenu.json()).reason).toBe("未授权访问");
+
+    const allowedMenu = await fetch(`${base}/api/qing-jia-shen-pi/menus/qing-jia-dan`, {
+      headers: { "x-platform-user": "employee" },
+    });
+    expect(allowedMenu.status).toBe(200);
+    expect((await allowedMenu.json()).menu.name).toBe("请假单");
 
     const created = await fetch(`${base}/api/qing-jia-shen-pi/请假单`, {
       method: "POST",
