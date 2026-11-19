@@ -2,11 +2,11 @@
 
 | 项 | 值 |
 |---|---|
-| 文档时间 | 2026-11-17 17:30:00 +0800 |
-| 状态 | 编排已实现，真实执行器待接入 |
+| 文档时间 | 2026-11-17 17:30:00 +0800（2026-11-19 补充执行器进展） |
+| 状态 | 编排已实现；白盒执行与测试节点任务已接入，黑盒待接入 |
 | 范围 | 总体计划第 5 项「在线测试」 |
 | 源码提交 | `b835786`（stage-5 源码随该提交进入仓库） |
-| 部署验证 | 已随平台部署到局域网 Ubuntu（`172.18.0.31`） |
+| 部署验证 | 已随平台部署到局域网 Ubuntu（`172.18.0.31`）；测试节点任务需重新安装节点后生效 |
 
 ## 已实现
 
@@ -34,22 +34,22 @@
 ### 接口与门户
 
 - `GET /api/projects/:code/tests`：查看案例与运行历史
-- `POST /api/projects/:code/tests`：运行测试
+- `POST /api/projects/:code/tests`：运行测试；异步节点执行时返回 `202` 与 `{ runId, status: "running", node }`
 - `GET /api/projects/:code/tests/runs/:runId`：查看运行步骤
-- `POST /api/projects/:code/tests/runs/:runId/replay`：回放失败运行
-- 门户 `TestResultsCard` 提供运行、查看步骤和回放入口。
+- `POST /api/projects/:code/tests/runs/:runId/replay`：回放失败运行；异步节点执行时同样返回 `202`
+- 门户 `TestResultsCard` 提供运行、查看步骤和回放入口；运行中每 3 秒刷新一次。
 
 ### 配置项与数据表
 
 - 配置：`test.nodePool`、`test.requirePassBeforePublish`、`test.stepTimeoutSeconds`、`test.runTimeoutSeconds`
-- 数据表：`test_cases`、`test_runs`、`test_step_records`
+- 数据表：`test_cases`、`test_runs`、`test_step_records`、`test_jobs`（2026-11-19 新增）
 
 ## 未实现（当前边界）
 
-- **真实执行器**：`defaultTestExecutor()` 明确返回「测试执行器未配置：Midscene.js 与 Vitest 白盒入口在测试区接入」，不会生成虚假通过记录。执行器通过 `buildServer({ testExecutor })` 注入。
-- **黑盒执行**：Midscene.js + Playwright 的定位策略（稳定标识 → 角色与可访问名称 → 上次成功定位记录）、截图、超时和模型调用尚未实现。
-- **白盒执行**：在测试区启动容器执行 `call`/`validate`/`migrate` 步骤的 Vitest 入口尚未实现。
-- **节点调度**：目前只校验测试节点池非空，执行器如何落到具体节点尚未实现。
+- **真实执行器**：2026-11-19 起，未注入 `testExecutor` 时控制面把测试任务下发到测试节点，由节点在候选镜像容器里运行白盒入口；接口返回 `202` 和运行 id，门户轮询结果。细节见 `docs/superpowers/plans/2026-11-19-test-node-execution.md`。
+- **黑盒执行**：Midscene.js + Playwright 的定位策略（稳定标识 → 角色与可访问名称 → 上次成功定位记录）、截图、超时和模型调用尚未实现；黑盒步骤目前明确记为失败。
+- **白盒执行**：已实现 HTTP 级 `call`/`validate`/`migrate` 步骤（`test-runner.mjs`），在测试容器内运行；严格意义的 Vitest 单元测试入口尚未接入。
+- **节点调度**：已按 `test.nodePool` 选择节点，并通过 `/desired` 原子领取任务；暂无优先级、重试队列和实时日志。
 - **门户案例编辑**：用户案例目前通过接口或草稿写入，门户暂无编辑界面。
 
 ## 验证记录
@@ -57,6 +57,7 @@
 - 2026-11-12 生产库中存在一条测试运行，状态 `failed`，原因正是「测试执行器未配置」，说明运行创建、失败原因记录和发布门闭合逻辑按设计工作。
 - 2026-11-17 部署后 `GET /api/projects/:code/tests` 返回 401（未登录），路由存在。
 - 2026-11-17 本地 `tsc` 通过，门户测试 19 个通过；`online-testing.test.ts` 与 `oa-template.test.ts` 属于 node 项目，需要 PostgreSQL，本机未启动数据库，未执行。
+- 2026-11-19 本地补充：`tsc` 通过；运行库与测试节点测试 12 个、门户测试 20 个通过。测试节点真实执行仍需重新部署控制面并在局域网测试区安装节点后验证。
 
 ## 代码位置
 
