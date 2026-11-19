@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { SystemDatabase } from "./database.js";
 import type { SystemConfig } from "./system-config.js";
 import { nodeInstallScript, type NodeCertificate } from "./node-install.js";
@@ -123,4 +123,25 @@ export async function prepareNodeInstall(
 
 function isUniqueViolation(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "23505";
+}
+
+/** 节点用 Bearer 令牌（安装令牌或注册令牌）鉴权；令牌只存哈希。 */
+export async function authenticateNode(
+  database: SystemDatabase,
+  name: string,
+  authorization: string,
+): Promise<{ name: string } | null> {
+  const token = authorization.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : "";
+  const found = await database.query<{ token_hash: string; install_token_hash: string }>(
+    "select token_hash, install_token_hash from nodes where name = $1",
+    [name],
+  );
+  const actual = createHash("sha256").update(token).digest("hex");
+  const hashes = [found.rows[0]?.token_hash ?? "", found.rows[0]?.install_token_hash ?? ""].filter(
+    (hash) => hash.length === actual.length,
+  );
+  if (!token || !hashes.some((hash) => timingSafeEqual(Buffer.from(hash), Buffer.from(actual)))) {
+    return null;
+  }
+  return { name };
 }

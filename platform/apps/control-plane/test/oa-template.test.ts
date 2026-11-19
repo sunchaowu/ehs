@@ -82,7 +82,7 @@ describe("oa template", () => {
     );
     const caseNames = caseRows.rows.map((row) => row.name);
     expect(caseNames).toEqual(
-      expect.arrayContaining(["员工提交请假", "部门负责人审批", "人事备案", "员工不能删除人事菜单", "请假单缺少必填字段被拒绝"]),
+      expect.arrayContaining(["员工提交请假", "部门负责人审批", "人事备案", "部门负责人不能访问组织菜单", "请假单缺少必填字段被拒绝"]),
     );
     await reopened.close();
 
@@ -137,7 +137,7 @@ describe("oa template", () => {
       [code],
     );
     const names = cases.rows.map((row) => row.name);
-    expect(names).toEqual(expect.arrayContaining(["员工提交请假", "部门负责人审批", "人事备案", "员工不能删除人事菜单", "请假单缺少必填字段被拒绝"]));
+    expect(names).toEqual(expect.arrayContaining(["员工提交请假", "部门负责人审批", "人事备案", "部门负责人不能访问组织菜单", "请假单缺少必填字段被拒绝"]));
     expect(names).toEqual(expect.arrayContaining([expect.stringContaining("请假单 创建接口返回记录"), expect.stringContaining("请假单 字段校验拒绝非法输入")]));
     expect(names).toEqual(expect.arrayContaining([expect.stringContaining("请假流程 流程走查")]));
     const source = await app.inject({

@@ -95,13 +95,20 @@ export function oaTemplate(projectCode: string): OaTemplate {
       },
       {
         method: "white-box",
-        name: "员工不能删除人事菜单",
-        steps: [{ action: "call", target: `${projectCode}/组织.delete`, value: "员工", expected: "拒绝并说明缺少删除授权" }],
+        name: "部门负责人不能访问组织菜单",
+        steps: [{ action: "call", target: `${projectCode}/menus/org`, value: "部门负责人", expected: "拒绝" }],
       },
       {
         method: "white-box",
         name: "请假单缺少必填字段被拒绝",
-        steps: [{ action: "validate", target: `${leave}/员工`, value: "", expected: "拒绝并说明缺少员工" }],
+        steps: [
+          {
+            action: "validate",
+            target: `${leave}/员工`,
+            value: JSON.stringify({ 员工: "", 请假类型: "事假", 开始日期: "2000-01-01", 结束日期: "2000-01-02", 事由: "示例" }),
+            expected: "拒绝并说明缺少员工",
+          },
+        ],
       },
     ],
   };

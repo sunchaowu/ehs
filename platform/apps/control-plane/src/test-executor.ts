@@ -32,10 +32,7 @@ export type TestExecutionResult = { steps: TestStepOutcome[] } | { reason: strin
 export type TestExecutor = (input: TestExecutionInput) => Promise<TestExecutionResult>;
 
 /**
- * 默认执行器：平台侧编排与记录已就绪，真实执行器（黑盒 Midscene.js + Playwright、
- * 白盒 Vitest 容器入口）在测试区接入时，通过 buildServer({ testExecutor }) 注入。
- * 未配置时明确失败，绝不生成虚假的通过记录。
+ * 生产路径不再在控制面进程内执行测试。控制面把用例下发给测试节点，
+ * 节点在候选镜像容器里运行 `test-runner.mjs` 并回报步骤；`buildServer({ testExecutor })`
+ * 只用于测试注入同步执行器。未注入时走 `node-tests.ts` 的异步任务。
  */
-export function defaultTestExecutor(): TestExecutor {
-  return async () => ({ reason: "测试执行器未配置：Midscene.js 与 Vitest 白盒入口在测试区接入" });
-}

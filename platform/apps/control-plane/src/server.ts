@@ -6,8 +6,9 @@ import { openDatabase } from "./database.js";
 import { dockerImageBuilder, type ImageBuildInput } from "./images.js";
 import { opensslCertificateIssuer, type NodeCertificate } from "./node-install.js";
 import { assignNodePool, poolsOverlap, prepareNodeInstall, registerNode } from "./nodes.js";
-import { defaultTestExecutor, type TestExecutor } from "./test-executor.js";
+import { type TestExecutor } from "./test-executor.js";
 import { readTestOverview, readTestRunSteps, replayTestRun, runProjectTests } from "./test-runs.js";
+import { acceptTestJobReport, dispatchProjectTestRun, dispatchReplayTestRun } from "./node-tests.js";
 import { createPluginRuntime } from "./plugin-runtime.js";
 import { acceptHealthReport, readDesiredWork, type ReportedProject } from "./releases.js";
 import { hashPassword } from "./passwords.js";
@@ -35,7 +36,7 @@ export async function buildServer(options?: {
   const databaseProvisioner = options?.databaseProvisioner ?? provisionPostgresDatabase;
   const certificateIssuer = options?.certificateIssuer ?? opensslCertificateIssuer;
   const pluginRuntime = options?.pluginRuntime ?? createPluginRuntime();
-  const testExecutor = options?.testExecutor ?? defaultTestExecutor();
+  const testExecutor = options?.testExecutor;
   app.get("/health", async () => ({ status: "ok" }));
   app.get("/slots", async () => ({ slots: listSlots() }));
   if (databaseUrl) {
@@ -741,6 +742,29 @@ export async function buildServer(options?: {
     }
   });
 
+  app.post("/api/nodes/:name/tests/:jobId", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const body = (request.body ?? {}) as { outcomes?: unknown; reason?: unknown };
+      const result = await acceptTestJobReport(
+        database,
+        (request.params as { name: string }).name,
+        request.headers.authorization ?? "",
+        (request.params as { jobId: string }).jobId,
+        body,
+      );
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return result;
+    } finally {
+      await database.close();
+    }
+  });
+
   app.get("/api/projects/:code/release", async (request, reply) => {
     const database = await requireDatabase(databaseUrl, reply);
     if (!database) {
@@ -899,7 +923,15 @@ export async function buildServer(options?: {
       if ("reason" in project) {
         return reply.code(project.status).send({ reason: project.reason });
       }
-      const result = await runProjectTests(database, { id: project.id, code: projectCode }, testExecutor);
+      const target = { id: project.id, code: projectCode };
+      if (!testExecutor) {
+        const dispatched = await dispatchProjectTestRun(database, target);
+        if ("reason" in dispatched) {
+          return reply.code(dispatched.status).send({ reason: dispatched.reason });
+        }
+        return reply.code(202).send(dispatched);
+      }
+      const result = await runProjectTests(database, target, testExecutor);
       if ("reason" in result) {
         return reply.code(result.status).send({ reason: result.reason });
       }
@@ -949,7 +981,16 @@ export async function buildServer(options?: {
       if ("reason" in project) {
         return reply.code(project.status).send({ reason: project.reason });
       }
-      const result = await replayTestRun(database, { id: project.id, code: projectCode }, (request.params as { runId: string }).runId, testExecutor);
+      const target = { id: project.id, code: projectCode };
+      const runId = (request.params as { runId: string }).runId;
+      if (!testExecutor) {
+        const dispatched = await dispatchReplayTestRun(database, target, runId);
+        if ("reason" in dispatched) {
+          return reply.code(dispatched.status).send({ reason: dispatched.reason });
+        }
+        return reply.code(202).send(dispatched);
+      }
+      const result = await replayTestRun(database, target, runId, testExecutor);
       if ("reason" in result) {
         return reply.code(result.status).send({ reason: result.reason });
       }

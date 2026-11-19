@@ -240,6 +240,23 @@ create table if not exists test_step_records (
   reason text not null default ''
 );
 
+create table if not exists test_jobs (
+  id uuid primary key,
+  run_id uuid not null references test_runs (id) on delete cascade,
+  node_name text not null references nodes (name) on delete cascade,
+  project_code text not null,
+  image_digest text not null,
+  database_name text not null,
+  cases jsonb not null,
+  step_timeout_seconds integer not null,
+  run_timeout_seconds integer not null,
+  status text not null,
+  claimed_at timestamptz,
+  finished_at timestamptz,
+  failure text not null default '',
+  created_at timestamptz not null
+);
+
 create table if not exists portal_notifications (
   id uuid primary key,
   user_id uuid not null references users (id) on delete cascade,

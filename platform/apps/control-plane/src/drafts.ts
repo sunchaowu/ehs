@@ -5,7 +5,8 @@ import { oaTemplate, type OaTemplate } from "./oa-template.js";
 import { isProjectCode, suggestProjectCode } from "./project-code.js";
 import { buildProjectImage, latestImageDigest, publishProject, type DatabaseProvisioner, type ImageBuilder } from "./publish.js";
 import { cancelDesiredPublication, readProjectRelease } from "./releases.js";
-import { defaultTestExecutor, type TestExecutor } from "./test-executor.js";
+import { type TestExecutor } from "./test-executor.js";
+import { dispatchProjectTestRun, dispatchReplayTestRun } from "./node-tests.js";
 import { normalizeUserCase } from "./test-cases.js";
 import { replayTestRun, runProjectTests, type TestRunResult } from "./test-runs.js";
 
@@ -456,8 +457,8 @@ export async function applyTool(
   actor: PublicUser,
   projectCode: string,
   call: { name?: string; arguments?: Record<string, unknown> },
-  executor: TestExecutor = defaultTestExecutor(),
-): Promise<{ recorded: true } | { reason: string; status: number } | TestRunResult> {
+  executor?: TestExecutor,
+): Promise<{ recorded: true } | { reason: string; status: number } | TestRunResult | { runId: string; status: string; node: string }> {
   const name = call.name ?? "";
   const args = call.arguments ?? {};
   if (name === "run_tests") {
@@ -473,6 +474,9 @@ export async function applyTool(
     if (!config["test.nodePool"].trim()) {
       return { reason: "测试节点池为空", status: 409 };
     }
+    if (!executor) {
+      return dispatchProjectTestRun(database, { id: project.id, code: projectCode });
+    }
     return runProjectTests(database, { id: project.id, code: projectCode }, executor);
   }
   if (name === "replay_test") {
@@ -483,6 +487,9 @@ export async function applyTool(
     const recordId = stringArg(args.record);
     if (!recordId) {
       return { reason: "缺少测试记录", status: 400 };
+    }
+    if (!executor) {
+      return dispatchReplayTestRun(database, { id: project.id, code: projectCode }, recordId);
     }
     return replayTestRun(database, { id: project.id, code: projectCode }, recordId, executor);
   }

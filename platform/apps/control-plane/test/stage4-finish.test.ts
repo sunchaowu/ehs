@@ -25,10 +25,12 @@ describe("node install script", () => {
     expect(script).toContain("KEY-DATA");
     expect(script).toContain("CA-DATA");
     expect(script).toContain("agent.mjs");
+    expect(script).toContain("test-runner.mjs");
     expect(script).toContain("docker");
     expect(script).toContain("database.url");
     expect(script).toContain("PLATFORM_DATABASE_URL_TEMPLATE");
     expect(script).toContain('health.storage === "postgres"');
+    expect(script).toContain("runtime.mode=test");
     expect(script).not.toContain("postgres://");
     expect(script).not.toContain("0.0.0.0");
   });

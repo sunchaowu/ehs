@@ -2,7 +2,7 @@ import { HomeOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SettingOutlined, Ap
 import { Alert, Avatar, Button, Card, Checkbox, ConfigProvider, Drawer, Dropdown, Empty, Form, Input, InputNumber, Layout, List, Menu, Space, Spin, Switch, Tag, Typography } from "antd";
 import enUS from "antd/locale/en_US";
 import zhCN from "antd/locale/zh_CN";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "./auth-page.css";
 import { languageName, shellCopy } from "./shell-copy.js";
 
@@ -1054,6 +1054,14 @@ function TestResultsCard(props: { projectCode: string }) {
   const [steps, setSteps] = useState<TestStepView[]>([]);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const loadSteps = async (runId: string) => {
     try {
@@ -1065,13 +1073,13 @@ function TestResultsCard(props: { projectCode: string }) {
     }
   };
 
-  const loadTests = async () => {
+  const loadTests = async (): Promise<TestsView | null> => {
     try {
       const response = await fetch(`/api/projects/${props.projectCode}/tests`);
       const body = (await response.json()) as Partial<TestsView> & { reason?: string };
       if (!response.ok) {
         setReason(body.reason ?? "测试结果读取失败");
-        return;
+        return null;
       }
       setReason("");
       const view: TestsView = {
@@ -1085,8 +1093,21 @@ function TestResultsCard(props: { projectCode: string }) {
       } else {
         setSteps([]);
       }
+      return view;
     } catch (error) {
       setReason(error instanceof Error ? error.message : "测试结果读取失败");
+      return null;
+    }
+  };
+
+  /** 测试节点异步执行：运行中每 3 秒刷新一次，结束后停止。 */
+  const reloadUntilSettled = async () => {
+    for (let attempt = 0; attempt < 200 && mounted.current; attempt += 1) {
+      const view = await loadTests();
+      if (!view || view.runs[0]?.status !== "running") {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 3000));
     }
   };
 
@@ -1100,7 +1121,7 @@ function TestResultsCard(props: { projectCode: string }) {
       } else {
         setReason("");
       }
-      await loadTests();
+      await reloadUntilSettled();
     } catch (error) {
       setReason(error instanceof Error ? error.message : "操作失败");
     } finally {

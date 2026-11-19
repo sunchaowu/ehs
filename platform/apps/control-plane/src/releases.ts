@@ -1,8 +1,8 @@
-import { createHash, timingSafeEqual } from "node:crypto";
 import type { SystemDatabase } from "./database.js";
 import type { DesignDocument } from "./compiler.js";
 import { projectDatabaseName } from "./images.js";
-import { poolNames } from "./nodes.js";
+import { authenticateNode, poolNames } from "./nodes.js";
+import { claimTestJobs, type NodeTestJob } from "./node-tests.js";
 import { candidateTestVerdict } from "./test-gate.js";
 
 export type ReportedProject = {
@@ -19,12 +19,15 @@ export async function readDesiredWork(
   database: SystemDatabase,
   name: string,
   authorization: string,
-): Promise<{ projects: Array<{ code: string; imageDigest: string; databaseName: string; replicas: number }> } | { reason: string; status: number }> {
-  const node = await authenticatedNode(database, name, authorization);
+): Promise<
+  | { projects: Array<{ code: string; imageDigest: string; databaseName: string; replicas: number }>; tests: NodeTestJob[] }
+  | { reason: string; status: number }
+> {
+  const node = await authenticateNode(database, name, authorization);
   if (!node) {
     return { reason: "节点凭证无效", status: 401 };
   }
-  return { projects: await assignmentsFor(database, name) };
+  return { projects: await assignmentsFor(database, name), tests: await claimTestJobs(database, name) };
 }
 
 export async function acceptHealthReport(
@@ -33,7 +36,7 @@ export async function acceptHealthReport(
   authorization: string,
   projects: ReportedProject[],
 ): Promise<{ accepted: true } | { reason: string; status: number }> {
-  const node = await authenticatedNode(database, name, authorization);
+  const node = await authenticateNode(database, name, authorization);
   if (!node) {
     return { reason: "节点凭证无效", status: 401 };
   }
@@ -253,16 +256,3 @@ async function assignmentsFor(database: SystemDatabase, name: string) {
     }));
 }
 
-async function authenticatedNode(database: SystemDatabase, name: string, authorization: string): Promise<{ name: string } | null> {
-  const token = authorization.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : "";
-  const found = await database.query<{ token_hash: string; install_token_hash: string }>(
-    "select token_hash, install_token_hash from nodes where name = $1",
-    [name],
-  );
-  const actual = createHash("sha256").update(token).digest("hex");
-  const hashes = [found.rows[0]?.token_hash ?? "", found.rows[0]?.install_token_hash ?? ""].filter((hash) => hash.length === actual.length);
-  if (!token || !hashes.some((hash) => timingSafeEqual(Buffer.from(hash), Buffer.from(actual)))) {
-    return null;
-  }
-  return { name };
-}
