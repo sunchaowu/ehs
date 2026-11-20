@@ -11,6 +11,7 @@ import { type TestExecutor } from "./test-executor.js";
 import { createModelClient, type ModelClient } from "./llm.js";
 import { readTestOverview, readTestRunSteps, replayTestRun, runProjectTests } from "./test-runs.js";
 import { acceptTestJobReport, dispatchProjectTestRun, dispatchReplayTestRun } from "./node-tests.js";
+import { addUserTestCase, deleteUserTestCase, listUserTestCases } from "./user-test-cases.js";
 import { createPluginRuntime } from "./plugin-runtime.js";
 import { acceptHealthReport, readDesiredWork, readProjectEntry, type ReportedProject } from "./releases.js";
 import { hashPassword } from "./passwords.js";
@@ -1189,6 +1190,77 @@ export async function buildServer(options?: {
   };
   app.all("/p/:code", projectEntry);
   app.all("/p/*", projectEntry);
+
+  app.get("/api/projects/:code/tests/cases", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const projectCode = (request.params as { code: string }).code;
+      const project = await memberProject(database, actor, projectCode);
+      if ("reason" in project) {
+        return reply.code(project.status).send({ reason: project.reason });
+      }
+      return { cases: await listUserTestCases(database, project.id) };
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.post("/api/projects/:code/tests/cases", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const projectCode = (request.params as { code: string }).code;
+      const project = await managedProject(database, actor, projectCode);
+      if ("reason" in project) {
+        return reply.code(project.status).send({ reason: project.reason });
+      }
+      const result = await addUserTestCase(database, { id: project.id, code: projectCode }, request.body as Record<string, unknown>);
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return reply.code(201).send(result);
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.delete("/api/projects/:code/tests/cases/:caseCode", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const projectCode = (request.params as { code: string }).code;
+      const project = await managedProject(database, actor, projectCode);
+      if ("reason" in project) {
+        return reply.code(project.status).send({ reason: project.reason });
+      }
+      const result = await deleteUserTestCase(database, { id: project.id, code: projectCode }, (request.params as { caseCode: string }).caseCode);
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return reply.code(204).send();
+    } finally {
+      await database.close();
+    }
+  });
 
   app.get("/api/projects/:code/tests", async (request, reply) => {
     const database = await requireDatabase(databaseUrl, reply);
