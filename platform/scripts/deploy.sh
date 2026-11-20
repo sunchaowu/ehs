@@ -61,50 +61,93 @@ ssh_opts=(
   -o ConnectTimeout=15
 )
 
+start_ts=$SECONDS
+
+step() {
+  local name="$1"
+  shift
+  local from=$SECONDS
+  printf '==> %s\n' "$name" >&2
+  "$@"
+  printf '<== %s 完成（%d 秒）\n' "$name" "$((SECONDS - from))" >&2
+}
+
 ssh_cmd() {
   ssh "${ssh_opts[@]}" "$DEPLOY_USER@$DEPLOY_HOST" "$@"
 }
 
-tar -C "$root" -czf - \
+step "打包并上传 platform/" tar -C "$root" -czf - \
   --exclude node_modules \
   --exclude dist \
   --exclude .git \
+  --exclude ./deploy/.env \
   . | ssh_cmd "mkdir -p \"\$HOME/enterprise-platform\" && tar -C \"\$HOME/enterprise-platform\" -xzf -"
 
-ssh_cmd bash -s << 'REMOTE'
+step "服务器构建与启动" ssh_cmd bash -s << 'REMOTE'
 set -euo pipefail
 cd "$HOME/enterprise-platform"
+if [[ ! -f deploy/.env ]]; then
+  echo "服务器缺少 deploy/.env（部署包不再覆盖服务器专用配置），请先创建后再部署" >&2
+  exit 1
+fi
 chmod 600 deploy/.env
+# 上传完整性校验：缺任何一个关键文件都说明 tar 上传不完整，立即失败。
+for required_file in \
+  package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json \
+  apps/control-plane/Dockerfile \
+  apps/portal/Dockerfile apps/portal/package.json apps/portal/pnpm-workspace.yaml \
+  scripts/deploy.sh deploy/compose.yaml deploy/compose.server.yaml; do
+  if [[ ! -f "$required_file" ]]; then
+    echo "上传不完整：缺少 $required_file" >&2
+    exit 1
+  fi
+done
 set -a
 source deploy/.env
 set +a
+
+# 私有仓库证书（幂等）：缺失时生成自签证书，否则 registry 会不断重启。
+mkdir -p deploy/registry/certs
+if [[ ! -s deploy/registry/certs/domain.crt || ! -s deploy/registry/certs/domain.key ]]; then
+  printf '==> 生成私有仓库证书\n' >&2
+  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+    -keyout deploy/registry/certs/domain.key -out deploy/registry/certs/domain.crt \
+    -subj "/CN=registry.internal" \
+    -addext "subjectAltName=DNS:registry.internal,DNS:localhost,IP:127.0.0.1" 2>/dev/null
+  chmod 640 deploy/registry/certs/domain.key
+fi
 printf '%s\n' "$DEPLOY_PASSWORD" | sudo -S -p "" -v
 sudo -n docker compose version >/dev/null 2>&1 || { echo "缺少 docker compose" >&2; exit 1; }
-
-# 私有镜像库证书：自签 CA 加域名证书。Docker 守护进程按目录信任 CA，不需要重启守护进程。
-mkdir -p deploy/registry/certs
-chmod 700 deploy/registry/certs
-if [[ ! -f deploy/registry/certs/domain.crt ]]; then
-  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-    -keyout deploy/registry/certs/ca.key -out deploy/registry/certs/ca.crt \
-    -subj "/CN=platform-registry-ca" >/dev/null 2>&1
-  openssl req -newkey rsa:2048 -nodes \
-    -keyout deploy/registry/certs/domain.key -out deploy/registry/certs/domain.csr \
-    -subj "/CN=registry.internal" >/dev/null 2>&1
-  printf 'subjectAltName=DNS:registry.internal,DNS:%s,IP:127.0.0.1\n' "$DEPLOY_HOST" > deploy/registry/certs/openssl.cnf
-  printf 'basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n' >> deploy/registry/certs/openssl.cnf
-  openssl x509 -req -in deploy/registry/certs/domain.csr \
-    -CA deploy/registry/certs/ca.crt -CAkey deploy/registry/certs/ca.key -CAcreateserial \
-    -out deploy/registry/certs/domain.crt -days 3650 \
-    -extfile deploy/registry/certs/openssl.cnf >/dev/null 2>&1
-fi
-chmod 600 deploy/registry/certs/*.key
-sudo -n mkdir -p /etc/docker/certs.d/registry.internal:5000
-sudo -n cp deploy/registry/certs/ca.crt /etc/docker/certs.d/registry.internal:5000/ca.crt
-grep -qs 'registry.internal' /etc/hosts || printf '127.0.0.1 registry.internal\n' | sudo -n tee -a /etc/hosts >/dev/null
-
 compose=(sudo -n docker compose -p enterprise-platform -f deploy/compose.yaml -f deploy/compose.server.yaml)
+
+# 配置 Docker 镜像加速（幂等）：可用 DOCKER_REGISTRY_MIRRORS 覆盖，空格分隔。
+mirror_config=$(
+  printf '%s\n' "${DOCKER_REGISTRY_MIRRORS:-https://docker.1ms.run https://docker.m.daocloud.io https://docker.xuanyuan.me}" \
+    | tr ' ' '\n' | sed '/^$/d' | sed 's/^/    "/; s/$/",/' | sed '$ s/,$//'
+)
+mirror_json=$(printf '{\n  "registry-mirrors": [\n%s\n  ]\n}\n' "$mirror_config")
+mirror_current=$(sudo -n cat /etc/docker/daemon.json 2>/dev/null || true)
+if [[ "$mirror_current" == "$mirror_json" ]]; then
+  printf '==> Docker 镜像加速已配置，跳过\n' >&2
+else
+  from=$SECONDS
+  printf '==> 配置 Docker 镜像加速\n' >&2
+  printf '%s\n' "$mirror_json" | sudo -n tee /etc/docker/daemon.json >/dev/null
+  sudo -n systemctl restart docker
+  printf '<== 镜像加速配置完成（%d 秒）\n' "$((SECONDS - from))" >&2
+fi
+
+from=$SECONDS
+printf '==> 拉起 system-db\n' >&2
 "${compose[@]}" up -d --build --wait system-db
-"${compose[@]}" run --rm -T --build control-plane pnpm exec tsx apps/control-plane/src/install.ts </dev/null
+printf '<== system-db 完成（%d 秒）\n' "$((SECONDS - from))" >&2
+from=$SECONDS
+printf '==> 安装初始管理员\n' >&2
+"${compose[@]}" run --rm -T control-plane pnpm exec tsx apps/control-plane/src/install.ts </dev/null
+printf '<== 安装完成（%d 秒）\n' "$((SECONDS - from))" >&2
+from=$SECONDS
+printf '==> 构建并启动全量服务\n' >&2
 "${compose[@]}" up -d --build
+printf '<== 全量服务完成（%d 秒）\n' "$((SECONDS - from))" >&2
+printf '服务器阶段耗时 %d 秒\n' "$SECONDS" >&2
 REMOTE

@@ -122,6 +122,8 @@ create table if not exists requirement_messages (
   created_at timestamptz not null
 );
 
+alter table requirement_messages add column if not exists role text not null default 'user';
+
 create table if not exists draft_records (
   id uuid primary key,
   project_id uuid not null references projects (id) on delete cascade,
@@ -171,6 +173,8 @@ create table if not exists node_reports (
   projects jsonb not null
 );
 
+alter table node_reports add column if not exists gateway text not null default '';
+
 create table if not exists desired_states (
   project_id uuid primary key references projects (id) on delete cascade,
   image_digest text not null,
@@ -182,8 +186,11 @@ create table if not exists published_menus (
   project_id uuid not null references projects (id) on delete cascade,
   code text not null,
   name text not null,
+  parent_code text,
   primary key (project_id, code)
 );
+
+alter table published_menus add column if not exists parent_code text;
 
 create table if not exists published_grants (
   project_id uuid not null references projects (id) on delete cascade,
@@ -239,6 +246,26 @@ create table if not exists test_step_records (
   passed boolean not null,
   reason text not null default ''
 );
+
+create table if not exists test_jobs (
+  id uuid primary key,
+  run_id uuid not null references test_runs (id) on delete cascade,
+  node_name text not null references nodes (name) on delete cascade,
+  project_code text not null,
+  image_digest text not null,
+  database_name text not null,
+  cases jsonb not null,
+  step_timeout_seconds integer not null,
+  run_timeout_seconds integer not null,
+  status text not null,
+  claimed_at timestamptz,
+  finished_at timestamptz,
+  failure text not null default '',
+  created_at timestamptz not null
+);
+
+alter table test_jobs add column if not exists replayed_from uuid references test_runs (id) on delete set null;
+alter table test_jobs add column if not exists replayed_from_digest text;
 
 create table if not exists portal_notifications (
   id uuid primary key,

@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// 在线测试会在容器内跑白盒用例，串行全套时单个用例可能超过默认 5 秒。
+vi.setConfig({ testTimeout: 30_000 });
 import { openDatabase } from "../src/database.js";
 import { installInitialAdmin } from "../src/install-admin.js";
 import { buildServer } from "../src/server.js";
@@ -58,6 +61,9 @@ describe("automatic test cases", () => {
     expect(whiteBox.map((testCase) => testCase.name)).toContain("请假单 创建接口返回记录");
     expect(whiteBox.map((testCase) => testCase.name)).toContain("请假单 字段校验拒绝非法输入");
     expect(whiteBox.map((testCase) => testCase.name)).toContain("请假审批 流程迁移");
+    const migration = whiteBox.find((testCase) => testCase.name === "请假审批 流程迁移");
+    // 白盒执行器只接受 <项目>/workflows/<流程>/<步骤>，自动生成必须匹配该格式。
+    expect(migration?.steps[0].target).toMatch(/^qing-jia-shen-pi\/workflows\/请假审批\//);
     expect(whiteBox.map((testCase) => testCase.name)).toContain("请假单 未授权访问被拒绝");
     const codes = new Set(first.map((testCase) => caseCode(testCase.method, testCase.name, testCase.steps)));
     expect(codes.size).toBe(first.length);
@@ -93,12 +99,24 @@ describe("online testing", () => {
     await reset.query("delete from users");
     await reset.query("delete from nodes");
     await reset.close();
-    return installInitialAdmin(databaseUrl!, {
+    const installed = await installInitialAdmin(databaseUrl!, {
       title: "企业应用平台",
       prodAdminUrl: testAdminUrl,
       testAdminUrl,
       registryAddress: "registry.internal",
     });
+    // installInitialAdmin 只填默认值，不覆盖已有配置；串行跑全套时必须显式恢复可达库与空节点池。
+    const configured = await openDatabase(databaseUrl!);
+    const config = await configured.readConfig();
+    await configured.saveConfig({
+      ...config,
+      "database.testAdminUrl": testAdminUrl,
+      "test.nodePool": "",
+      "scheduler.defaultNodePool": "",
+      "test.requirePassBeforePublish": true,
+    });
+    await configured.close();
+    return installed;
   }
 
   async function login(server: NonNullable<typeof app>, password: string) {
@@ -330,5 +348,109 @@ describe("online testing", () => {
     });
     expect(unknown.statusCode).toBe(404);
     expect(unknown.json()).toEqual({ reason: "没有这条测试记录" });
+  }, 120000);
+
+  it("keeps replay metadata through the asynchronous node path", async () => {
+    const databaseUrl = process.env.DATABASE_SYSTEM_URL!;
+    const installed = await installAdmin();
+    app = await buildServer({
+      databaseUrl,
+      imageBuilder: async () => ({ digest }),
+      databaseProvisioner: async () => ({ created: true }),
+    });
+    const cookie = await login(app, installed.password);
+    const code = await createProjectWithDesign(app, cookie, "请假审批");
+    const registered = await app.inject({
+      method: "POST",
+      url: "/api/nodes",
+      cookies: { platform_session: cookie },
+      payload: { name: "test-1", zone: "测试区" },
+    });
+    const token = registered.json().token as string;
+    await app.inject({
+      method: "PUT",
+      url: "/api/nodes/test-1/pool",
+      cookies: { platform_session: cookie },
+      payload: { pool: "test" },
+    });
+
+    const seed = await openDatabase(databaseUrl);
+    const project = await seed.query<{ id: string }>("select id from projects where code = $1", [code]);
+    const original = await seed.query<{ id: string }>(
+      `insert into test_runs (id, project_id, image_digest, status, started_at)
+       values (gen_random_uuid(), $1, $2, 'passed', now()) returning id`,
+      [project.rows[0].id, digest],
+    );
+    await seed.query(
+      `insert into test_step_records
+       (id, run_id, case_code, case_name, step_index, method, image_digest, started_at, locator, input, expected, actual, passed, reason)
+       values (gen_random_uuid(), $1, $2, $3, 1, $4, $5, now(), $6, $7::jsonb, $8, $8, true, '')`,
+      [
+        original.rows[0].id,
+        "case-1",
+        "请假单 创建接口返回记录",
+        "white-box",
+        digest,
+        "qing-jia-shen-pi/请假单.create",
+        JSON.stringify({ action: "call", target: "qing-jia-shen-pi/请假单.create" }),
+        "返回带 id 的记录",
+      ],
+    );
+    await seed.close();
+
+    const replay = await app.inject({
+      method: "POST",
+      url: `/api/projects/${code}/tests/runs/${original.rows[0].id}/replay`,
+      cookies: { platform_session: cookie },
+    });
+    expect(replay.statusCode).toBe(202);
+    const runId = replay.json().runId as string;
+
+    const queued = await openDatabase(databaseUrl);
+    const jobs = await queued.query<{
+      id: string;
+      replayed_from: string | null;
+      replayed_from_digest: string | null;
+      cases: Array<{ code: string; name: string; method: string; steps: Array<{ index: number; target: string; expected?: string }> }>;
+    }>("select id, replayed_from, replayed_from_digest, cases from test_jobs where run_id = $1", [runId]);
+    expect(jobs.rows).toHaveLength(1);
+    expect(jobs.rows[0].replayed_from).toBe(original.rows[0].id);
+    expect(jobs.rows[0].replayed_from_digest).toBe(digest);
+    const job = jobs.rows[0];
+    await queued.close();
+
+    const outcomes = job.cases.flatMap((testCase) =>
+      testCase.steps.map((step) => ({
+        caseCode: testCase.code,
+        caseName: testCase.name,
+        stepIndex: step.index,
+        method: testCase.method,
+        locator: step.target,
+        input: { action: "call", target: step.target },
+        expected: step.expected ?? "",
+        actual: "ok",
+        passed: true,
+        reason: "",
+      })),
+    );
+    const reported = await app.inject({
+      method: "POST",
+      url: `/api/nodes/test-1/tests/${job.id}`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { outcomes },
+    });
+    expect(reported.statusCode).toBe(200);
+
+    const verified = await openDatabase(databaseUrl);
+    const run = await verified.query<{ replayed_from: string | null; replayed_from_digest: string | null; status: string }>(
+      "select replayed_from, replayed_from_digest, status from test_runs where id = $1",
+      [runId],
+    );
+    expect(run.rows[0]).toMatchObject({
+      replayed_from: original.rows[0].id,
+      replayed_from_digest: digest,
+      status: "passed",
+    });
+    await verified.close();
   }, 120000);
 });

@@ -122,6 +122,10 @@ export function generateAutomaticCases(projectCode: string, design: DesignDocume
       steps: [{ index: 1, action: "call", target: `${projectCode}/${entity.name}.create`, value: JSON.stringify(fields), expected: "返回带 id 的记录" }],
     });
     const invalidTarget = entity.fields.find((field) => field.type === "number" || field.type === "date" || field.type === "datetime") ?? entity.fields[0];
+    const invalidFields = Object.fromEntries(entity.fields.map((field) => [field.name, defaultFieldValue(field.type, field.name, field.target)]));
+    if (invalidTarget) {
+      invalidFields[invalidTarget.name] = invalidFieldValue(invalidTarget.type);
+    }
     cases.push({
       origin: "auto",
       method: "white-box",
@@ -131,7 +135,7 @@ export function generateAutomaticCases(projectCode: string, design: DesignDocume
           index: 1,
           action: "validate",
           target: invalidTarget ? `${projectCode}/${entity.name}/${invalidTarget.name}` : `${projectCode}/${entity.name}`,
-          value: invalidTarget ? invalidFieldValue(invalidTarget.type) : "非法值",
+          value: JSON.stringify(invalidFields),
           expected: "拒绝并说明字段",
         },
       ],
@@ -145,7 +149,7 @@ export function generateAutomaticCases(projectCode: string, design: DesignDocume
       steps: workflow.steps.map((step, position) => ({
         index: position + 1,
         action: "migrate",
-        target: `${projectCode}/${workflow.name}/${step}`,
+        target: `${projectCode}/workflows/${workflow.name}/${step}`,
         expected: "迁移成功",
       })),
     });
@@ -166,7 +170,7 @@ export function generateAutomaticCases(projectCode: string, design: DesignDocume
       origin: "auto",
       method: "white-box",
       name: `${menu.name} 未授权访问被拒绝`,
-      steps: [{ index: 1, action: "call", target: `${projectCode}/${menu.code}`, value: "未授权用户", expected: "拒绝" }],
+      steps: [{ index: 1, action: "call", target: `${projectCode}/menus/${menu.code}`, value: "未授权用户", expected: "拒绝" }],
     });
   }
   return cases;

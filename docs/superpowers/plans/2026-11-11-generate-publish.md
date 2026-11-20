@@ -42,3 +42,12 @@
 - `platform/apps/control-plane/src/server.ts`
 - `platform/apps/control-plane/src/schema.sql`
 - `platform/apps/portal/src/App.tsx`
+
+## 2026-11-17 补充核对
+
+- 管线本身已按上述行为实现并部署，但生成产物还缺少运行时：`compiler.ts` 生成的模块引用 `@platform/runtime` 的 `createStandardModule`，仓库中尚无该包；`images.ts` 生成的 Dockerfile 只复制 `modules/`，没有依赖安装和启动命令；节点启动容器时也未传入口命令。因此当前发布出的镜像不能提供业务服务，接入运行时应作为后续独立事项，不改变本阶段的管线边界。
+
+## 2026-11-18 补充核对
+
+- 最小运行库已实现并随镜像发布，记录见 `docs/superpowers/plans/2026-11-18-module-runtime.md`。生成镜像现在包含 `node_modules/@platform/runtime`、`pg` 依赖和启动命令，容器可提供 `/health`、菜单、实体、流程与表单接口；存在 `DATABASE_URL` 时记录落到项目库，节点代理从本机模板注入连接串并读取容器健康状态。控制面镜像已带 Docker CLI，部署 compose 挂载宿主套接字，`registry.address` 缺少端口时按 5000 补全；局域网探针已验证容器内可构建并推送镜像。入口路由与授权校验仍未接；当前运行实例需重新部署后才能使用平台侧构建。
+

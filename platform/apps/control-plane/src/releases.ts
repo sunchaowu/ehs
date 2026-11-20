@@ -1,8 +1,8 @@
-import { createHash, timingSafeEqual } from "node:crypto";
 import type { SystemDatabase } from "./database.js";
 import type { DesignDocument } from "./compiler.js";
 import { projectDatabaseName } from "./images.js";
-import { poolNames } from "./nodes.js";
+import { authenticateNode, poolNames } from "./nodes.js";
+import { claimTestJobs, type NodeTestJob } from "./node-tests.js";
 import { candidateTestVerdict } from "./test-gate.js";
 
 export type ReportedProject = {
@@ -19,12 +19,15 @@ export async function readDesiredWork(
   database: SystemDatabase,
   name: string,
   authorization: string,
-): Promise<{ projects: Array<{ code: string; imageDigest: string; databaseName: string; replicas: number }> } | { reason: string; status: number }> {
-  const node = await authenticatedNode(database, name, authorization);
+): Promise<
+  | { projects: Array<{ code: string; imageDigest: string; databaseName: string; replicas: number }>; tests: NodeTestJob[] }
+  | { reason: string; status: number }
+> {
+  const node = await authenticateNode(database, name, authorization);
   if (!node) {
     return { reason: "节点凭证无效", status: 401 };
   }
-  return { projects: await assignmentsFor(database, name) };
+  return { projects: await assignmentsFor(database, name), tests: await claimTestJobs(database, name) };
 }
 
 export async function acceptHealthReport(
@@ -32,23 +35,67 @@ export async function acceptHealthReport(
   name: string,
   authorization: string,
   projects: ReportedProject[],
+  gateway = "",
 ): Promise<{ accepted: true } | { reason: string; status: number }> {
-  const node = await authenticatedNode(database, name, authorization);
+  const node = await authenticateNode(database, name, authorization);
   if (!node) {
     return { reason: "节点凭证无效", status: 401 };
   }
   await database.query(
-    `insert into node_reports (node_name, reported_at, projects)
-     values ($1, now(), $2::jsonb)
-     on conflict (node_name) do update set reported_at = now(), projects = excluded.projects`,
-    [name, JSON.stringify(projects)],
+    `insert into node_reports (node_name, reported_at, projects, gateway)
+     values ($1, now(), $2::jsonb, $3)
+     on conflict (node_name) do update set reported_at = now(), projects = excluded.projects, gateway = excluded.gateway`,
+    [name, JSON.stringify(projects), gateway.trim()],
   );
   await publishHealthyProjects(database);
   return { accepted: true };
 }
 
-export async function readProjectRelease(database: SystemDatabase, projectCode: string) {
-  const project = await database.query<{ id: string; container_group: string }>(
+/**
+ * 项目入口：只对已发布版本开放，目标节点上报了网关地址且容器正在运行。
+ * 返回的地址形如 `http://172.18.0.32:8081`，由控制面继续转发 `/p/<编码>/...`。
+ */
+export async function readProjectEntry(
+  database: SystemDatabase,
+  projectCode: string,
+): Promise<{ gateway: string } | { reason: string; status: number }> {
+  const project = await database.query<{ id: string }>("select id from projects where code = $1", [projectCode]);
+  const projectId = project.rows[0]?.id;
+  if (!projectId) {
+    return { reason: "项目不存在", status: 404 };
+  }
+  const published = await database.query<{ image_digest: string }>(
+    "select image_digest from published_versions where project_id = $1",
+    [projectId],
+  );
+  const digest = published.rows[0]?.image_digest;
+  if (!digest) {
+    return { reason: "项目还没有已发布版本", status: 409 };
+  }
+  const desired = await database.query<{ target_nodes: string }>(
+    "select target_nodes from desired_states where project_id = $1",
+    [projectId],
+  );
+  const names = poolNames(desired.rows[0]?.target_nodes ?? "");
+  if (names.length === 0) {
+    return { reason: "项目还没有目标节点", status: 409 };
+  }
+  const reports = await database.query<{ node_name: string; gateway: string; projects: ReportedProject[] }>(
+    `select node_name, gateway, projects from node_reports
+     where node_name = any($1::text[]) and gateway <> ''
+     order by reported_at desc`,
+    [names],
+  );
+  for (const row of reports.rows) {
+    const state = (row.projects ?? []).find((item) => item.code === projectCode);
+    if (state?.running && state.imageDigest === digest) {
+      return { gateway: row.gateway.replace(/\/+$/, "") };
+    }
+  }
+  return { reason: "项目容器尚未在目标节点就绪", status: 503 };
+}
+
+export async function readProjectRelease(database: SystemDatabase, projectCode: string) {  const project = await database.query<{ id: string; container_group: string }>(
     `select projects.id, container_groups.code as container_group
      from projects
      join container_groups on container_groups.id = projects.container_group_id
@@ -193,9 +240,9 @@ async function snapshotPublished(database: SystemDatabase, projectId: string, di
   await database.query("delete from published_grants where project_id = $1", [projectId]);
   for (const menu of design.menus) {
     await database.query(
-      `insert into published_menus (project_id, code, name) values ($1, $2, $3)
-       on conflict (project_id, code) do update set name = excluded.name`,
-      [projectId, menu.code, menu.name],
+      `insert into published_menus (project_id, code, name, parent_code) values ($1, $2, $3, $4)
+       on conflict (project_id, code) do update set name = excluded.name, parent_code = excluded.parent_code`,
+      [projectId, menu.code, menu.name, menu.parentCode],
     );
   }
   for (const grant of design.grants) {
@@ -253,16 +300,3 @@ async function assignmentsFor(database: SystemDatabase, name: string) {
     }));
 }
 
-async function authenticatedNode(database: SystemDatabase, name: string, authorization: string): Promise<{ name: string } | null> {
-  const token = authorization.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : "";
-  const found = await database.query<{ token_hash: string; install_token_hash: string }>(
-    "select token_hash, install_token_hash from nodes where name = $1",
-    [name],
-  );
-  const actual = createHash("sha256").update(token).digest("hex");
-  const hashes = [found.rows[0]?.token_hash ?? "", found.rows[0]?.install_token_hash ?? ""].filter((hash) => hash.length === actual.length);
-  if (!token || !hashes.some((hash) => timingSafeEqual(Buffer.from(hash), Buffer.from(actual)))) {
-    return null;
-  }
-  return { name };
-}

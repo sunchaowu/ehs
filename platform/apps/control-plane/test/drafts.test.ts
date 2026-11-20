@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// 会话与草稿用例包含多次建库和工具循环，串行全套时放宽超时。
+vi.setConfig({ testTimeout: 15_000 });
 import { openDatabase } from "../src/database.js";
 import { installInitialAdmin } from "../src/install-admin.js";
 import { buildServer } from "../src/server.js";
@@ -24,9 +27,12 @@ describe("drafts and requirement sessions", () => {
     await database.migrate();
     await database.query("delete from sessions");
     await database.query("delete from users");
+    const initialConfig = await database.readConfig();
+    await database.saveConfig({ ...initialConfig, "model.baseUrl": "", "model.name": "", "model.apiKey": "" });
     await database.close();
     const installed = await installInitialAdmin(databaseUrl!, input);
-    app = await buildServer({ databaseUrl });
+    const silentModel = async () => ({ message: { role: "assistant" as const, content: null } });
+    app = await buildServer({ databaseUrl, modelClient: silentModel });
     const registered = await app.inject({
       method: "POST",
       url: "/api/account/register",
@@ -114,8 +120,8 @@ describe("drafts and requirement sessions", () => {
       url: `/api/projects/${code}/messages`,
       cookies: { platform_session: employeeCookie },
     });
-    expect(adminMessages.json().messages).toEqual([{ body: "管理员的需求" }]);
-    expect(employeeMessages.json().messages).toEqual([{ body: "员工的需求" }]);
+    expect(adminMessages.json().messages).toEqual([{ role: "user", body: "管理员的需求" }]);
+    expect(employeeMessages.json().messages).toEqual([{ role: "user", body: "员工的需求" }]);
     await app.inject({
       method: "POST",
       url: `/api/projects/${code}/grants`,
@@ -148,7 +154,7 @@ describe("drafts and requirement sessions", () => {
     expect(confirmed.statusCode).toBe(201);
     expect(confirmed.json().change.added.menus).toEqual([{ code: "qing-jia-dan", name: "请假单", parent_code: null }]);
     expect(confirmed.json().change.modified).toEqual([]);
-    expect(confirmed.json().change.removed).toEqual([]);
+    expect(confirmed.json().change.removed).toEqual({ menus: [], grants: [] });
     const menus = await app.inject({
       method: "GET",
       url: "/api/menus",

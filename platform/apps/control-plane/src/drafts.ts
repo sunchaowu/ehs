@@ -1,12 +1,19 @@
 import type { PublicUser } from "./accounts.js";
 import type { SystemDatabase } from "./database.js";
 import { latestCompiledSource, storeCompiledDesign } from "./designs.js";
+import { oaTemplate, type OaTemplate } from "./oa-template.js";
 import { isProjectCode, suggestProjectCode } from "./project-code.js";
 import { buildProjectImage, latestImageDigest, publishProject, type DatabaseProvisioner, type ImageBuilder } from "./publish.js";
 import { cancelDesiredPublication, readProjectRelease } from "./releases.js";
-import { defaultTestExecutor, type TestExecutor } from "./test-executor.js";
+import { type TestExecutor } from "./test-executor.js";
+import { dispatchProjectTestRun, dispatchReplayTestRun } from "./node-tests.js";
 import { normalizeUserCase } from "./test-cases.js";
 import { replayTestRun, runProjectTests, type TestRunResult } from "./test-runs.js";
+import { createModelClient, type ChatMessage, type ModelClient, type ToolCall } from "./llm.js";
+import { createProject } from "./projects.js";
+import { requirementSystemPrompt } from "./requirement-session.js";
+import { sessionToolDefinitions } from "./requirement-tools.js";
+import { diffSolution, type DraftGrant, type SolutionChange } from "./solution-diff.js";
 
 const allowedActions = ["访问", "新增", "修改", "删除"];
 const fieldTypes = ["text", "longText", "number", "boolean", "date", "datetime", "user", "ref"];
@@ -122,8 +129,24 @@ export async function assignRole(
   return { assigned: true };
 }
 
-export async function effectiveActions(
+/** 用户在项目里的角色名，用于注入运行库的身份头。 */
+export async function projectRoles(
   database: SystemDatabase,
+  projectCode: string,
+  username: string,
+): Promise<string[]> {
+  const found = await database.query<{ role_name: string }>(
+    `select project_role_members.role_name
+     from project_role_members
+     join projects on projects.id = project_role_members.project_id
+     where projects.code = $1 and project_role_members.username = $2
+     order by project_role_members.role_name`,
+    [projectCode, username],
+  );
+  return found.rows.map((row) => row.role_name);
+}
+
+export async function effectiveActions(  database: SystemDatabase,
   projectCode: string,
   username: string,
   menuCode: string,
@@ -150,28 +173,287 @@ export async function effectiveActions(
   return allowedActions.filter((action) => found.rows.some((row) => row.action === action));
 }
 
-export async function confirmSolution(
+export type ProjectAccessView = {
+  menus: Array<{ code: string; name: string; parent_code: string | null }>;
+  roles: Array<{ name: string; members: string[] }>;
+  grants: DraftGrant[];
+};
+
+/** 项目授权管理页的只读视图：草稿菜单、角色及其成员、草稿授权。 */
+export async function listProjectAccess(
   database: SystemDatabase,
   actor: PublicUser,
   projectCode: string,
-): Promise<{ change: { added: unknown; modified: unknown[]; removed: unknown[] }; sourceRevision: string } | { reason: string; status: number }> {
+): Promise<{ access: ProjectAccessView } | { reason: string; status: number }> {
   const project = await managedProject(database, actor, projectCode);
   if ("reason" in project) {
     return project;
   }
-  const menus = await database.query("select code, name, parent_code from draft_menus where project_id = $1 order by sort", [project.id]);
-  const grants = await database.query(
-    "select principal_type, principal_name, menu_code, action from draft_grants where project_id = $1",
+  const menus = await database.query<{ code: string; name: string; parent_code: string | null }>(
+    "select code, name, parent_code from draft_menus where project_id = $1 order by sort",
     [project.id],
   );
-  const added = { menus: menus.rows, grants: grants.rows };
+  const roles = await database.query<{ name: string }>(
+    "select name from project_roles where project_id = $1 order by name",
+    [project.id],
+  );
+  const members = await database.query<{ role_name: string; username: string }>(
+    "select role_name, username from project_role_members where project_id = $1 order by username",
+    [project.id],
+  );
+  const grants = await database.query<DraftGrant>(
+    `select principal_type, principal_name, menu_code, action from draft_grants
+     where project_id = $1 order by principal_type, principal_name, menu_code, action`,
+    [project.id],
+  );
+  return {
+    access: {
+      menus: menus.rows,
+      roles: roles.rows.map((role) => ({
+        name: role.name,
+        members: members.rows.filter((item) => item.role_name === role.name).map((item) => item.username),
+      })),
+      grants: grants.rows,
+    },
+  };
+}
+
+export async function revokeGrant(
+  database: SystemDatabase,
+  actor: PublicUser,
+  projectCode: string,
+  request: { principalType?: string; principalName?: string; menu?: string; action?: string },
+): Promise<{ revoked: true } | { reason: string; status: number }> {
+  const project = await managedProject(database, actor, projectCode);
+  if ("reason" in project) {
+    return project;
+  }
+  if (request.principalType !== "user" && request.principalType !== "role") {
+    return { reason: "授权对象无效", status: 400 };
+  }
+  const principalName = request.principalName?.trim() ?? "";
+  const menu = request.menu?.trim() ?? "";
+  const action = request.action?.trim() ?? "";
+  if (!principalName || !menu || !action) {
+    return { reason: "请输入授权对象、菜单和操作", status: 400 };
+  }
+  const revoked = await database.query(
+    `delete from draft_grants
+     where project_id = $1 and principal_type = $2 and principal_name = $3 and menu_code = $4 and action = $5`,
+    [project.id, request.principalType, principalName, menu, action],
+  );
+  if ((revoked.rowCount ?? 0) === 0) {
+    return { reason: "授权不存在", status: 404 };
+  }
+  return { revoked: true };
+}
+
+export async function unassignRole(
+  database: SystemDatabase,
+  actor: PublicUser,
+  projectCode: string,
+  request: { role?: string; username?: string },
+): Promise<{ unassigned: true } | { reason: string; status: number }> {
+  const project = await managedProject(database, actor, projectCode);
+  if ("reason" in project) {
+    return project;
+  }
+  const role = request.role?.trim() ?? "";
+  const username = request.username?.trim() ?? "";
+  if (!role || !username) {
+    return { reason: "请输入角色和用户", status: 400 };
+  }
+  const removed = await database.query(
+    "delete from project_role_members where project_id = $1 and role_name = $2 and username = $3",
+    [project.id, role, username],
+  );
+  if ((removed.rowCount ?? 0) === 0) {
+    return { reason: "角色成员不存在", status: 404 };
+  }
+  return { unassigned: true };
+}
+
+export type ApplyTemplateResult = {
+  applied: true;
+  template: string;
+  menus: number;
+  entities: number;
+  workflows: number;
+  grants: number;
+  cases: number;
+};
+
+export async function applyOaTemplate(
+  database: SystemDatabase,
+  actor: PublicUser,
+  projectCode: string,
+  template: OaTemplate = oaTemplate(projectCode),
+): Promise<ApplyTemplateResult | { reason: string; status: number }> {
+  const project = await managedProject(database, actor, projectCode);
+  if ("reason" in project) {
+    return project;
+  }
+  // 菜单：同名复用已有编码，避免重复应用时堆叠「组织-2」
+  const menuCodes = new Map<string, string>();
+  let sort = await database.query<{ next: number }>(
+    "select coalesce(max(sort), 0) + 1 as next from draft_menus where project_id = $1",
+    [project.id],
+  );
+  let nextSort = sort.rows[0].next;
+  for (const menu of template.menus) {
+    const existing = await database.query<{ code: string }>(
+      "select code from draft_menus where project_id = $1 and name = $2",
+      [project.id, menu.name],
+    );
+    if (existing.rows[0]) {
+      menuCodes.set(menu.key, existing.rows[0].code);
+      continue;
+    }
+    const suggested = suggestProjectCode(menu.name);
+    if ("reason" in suggested) {
+      return { reason: `无法生成菜单编码：${menu.name}`, status: 400 };
+    }
+    const code = await unusedMenuCode(database, project.id, suggested.code);
+    const parent = menu.parent ? menuCodes.get(template.menus.find((item) => item.name === menu.parent)?.key ?? "") ?? null : null;
+    await database.query(
+      `insert into draft_menus (id, project_id, code, name, parent_code, sort)
+       values (gen_random_uuid(), $1, $2, $3, $4, $5)`,
+      [project.id, code, menu.name, parent, nextSort],
+    );
+    menuCodes.set(menu.key, code);
+    nextSort += 1;
+  }
+  // 数据与流程：同名跳过，不覆盖已有草稿
+  let entityCount = 0;
+  for (const entity of template.entities) {
+    const found = await database.query(
+      "select 1 from draft_records where project_id = $1 and kind = 'entity' and body->>'name' = $2",
+      [project.id, entity.name],
+    );
+    if (found.rows.length > 0) {
+      continue;
+    }
+    await database.query(
+      "insert into draft_records (id, project_id, kind, body) values (gen_random_uuid(), $1, 'entity', $2::jsonb)",
+      [project.id, JSON.stringify({ name: entity.name, fields: entity.fields })],
+    );
+    entityCount += 1;
+  }
+  let workflowCount = 0;
+  const foundWorkflow = await database.query(
+    "select 1 from draft_records where project_id = $1 and kind = 'workflow' and body->>'name' = $2",
+    [project.id, template.workflow.name],
+  );
+  if (foundWorkflow.rows.length === 0) {
+    await database.query(
+      "insert into draft_records (id, project_id, kind, body) values (gen_random_uuid(), $1, 'workflow', $2::jsonb)",
+      [project.id, JSON.stringify(template.workflow)],
+    );
+    workflowCount = 1;
+  }
+  // 角色与授权
+  let grantCount = 0;
+  for (const grant of template.grants) {
+    const menuCode = menuCodes.get(template.menus.find((item) => item.name === grant.menu)?.key ?? "");
+    if (!menuCode) {
+      return { reason: `模板菜单缺失：${grant.menu}`, status: 500 };
+    }
+    await database.query(
+      "insert into project_roles (project_id, name) values ($1, $2) on conflict do nothing",
+      [project.id, grant.role],
+    );
+    for (const action of grant.actions) {
+      const inserted = await database.query(
+        `insert into draft_grants (project_id, principal_type, principal_name, menu_code, action)
+         values ($1, 'role', $2, $3, $4) on conflict do nothing`,
+        [project.id, grant.role, menuCode, action],
+      );
+      if ((inserted.rowCount ?? 0) > 0) {
+        grantCount += 1;
+      }
+    }
+  }
+  // 用户测试案例：同名跳过
+  let caseCount = 0;
+  for (const testCase of template.cases) {
+    const found = await database.query(
+      "select 1 from draft_records where project_id = $1 and kind = 'test_case' and body->>'name' = $2",
+      [project.id, testCase.name],
+    );
+    if (found.rows.length > 0) {
+      continue;
+    }
+    await database.query(
+      "insert into draft_records (id, project_id, kind, body) values (gen_random_uuid(), $1, 'test_case', $2::jsonb)",
+      [project.id, JSON.stringify({ method: testCase.method, name: testCase.name, steps: testCase.steps })],
+    );
+    caseCount += 1;
+  }
+  return {
+    applied: true,
+    template: template.name,
+    menus: menuCodes.size,
+    entities: entityCount,
+    workflows: workflowCount,
+    grants: grantCount,
+    cases: caseCount,
+  };
+}
+
+/** 方案确认页的只读预览：草稿相对已发布版本的真实增量。 */
+export async function previewSolution(
+  database: SystemDatabase,
+  actor: PublicUser,
+  projectCode: string,
+): Promise<{ change: SolutionChange } | { reason: string; status: number }> {
+  const project = await managedProject(database, actor, projectCode);
+  if ("reason" in project) {
+    return project;
+  }
+  const change = await projectChange(database, project.id);
+  return { change };
+}
+
+async function projectChange(database: SystemDatabase, projectId: string): Promise<SolutionChange> {
+  const menus = await database.query<{ code: string; name: string; parent_code: string | null }>(
+    "select code, name, parent_code from draft_menus where project_id = $1 order by sort",
+    [projectId],
+  );
+  const grants = await database.query<{ principal_type: string; principal_name: string; menu_code: string; action: string }>(
+    "select principal_type, principal_name, menu_code, action from draft_grants where project_id = $1",
+    [projectId],
+  );
+  const publishedMenus = await database.query<{ code: string; name: string; parent_code: string | null }>(
+    "select code, name, parent_code from published_menus where project_id = $1",
+    [projectId],
+  );
+  const publishedGrants = await database.query<{ principal_type: string; principal_name: string; menu_code: string; action: string }>(
+    "select principal_type, principal_name, menu_code, action from published_grants where project_id = $1",
+    [projectId],
+  );
+  return diffSolution(
+    { menus: menus.rows, grants: grants.rows },
+    { menus: publishedMenus.rows, grants: publishedGrants.rows },
+  );
+}
+
+export async function confirmSolution(
+  database: SystemDatabase,
+  actor: PublicUser,
+  projectCode: string,
+): Promise<{ change: SolutionChange; sourceRevision: string } | { reason: string; status: number }> {
+  const project = await managedProject(database, actor, projectCode);
+  if ("reason" in project) {
+    return project;
+  }
+  const change = await projectChange(database, project.id);
   await database.query(
     `insert into openspec_changes (id, project_id, added, modified, removed, confirmed_at)
-     values (gen_random_uuid(), $1, $2::jsonb, '[]'::jsonb, '[]'::jsonb, now())`,
-    [project.id, JSON.stringify(added)],
+     values (gen_random_uuid(), $1, $2::jsonb, $3::jsonb, $4::jsonb, now())`,
+    [project.id, JSON.stringify(change.added), JSON.stringify(change.modified), JSON.stringify(change.removed)],
   );
   const compiled = await storeCompiledDesign(database, project.id);
-  return { change: { added, modified: [], removed: [] }, sourceRevision: compiled.sourceRevision };
+  return { change, sourceRevision: compiled.sourceRevision };
 }
 
 export async function readProjectSource(
@@ -280,7 +562,8 @@ export async function postRequirementMessage(
   actor: PublicUser,
   projectCode: string,
   body: string,
-): Promise<{ stored: true } | { reason: string; status: number }> {
+  options: { model?: ModelClient; executor?: TestExecutor } = {},
+): Promise<{ stored: true; reply: string } | { reason: string; status: number }> {
   const config = await database.readConfig();
   if (!config["model.baseUrl"] || !config["model.name"] || !config["model.apiKey"]) {
     return { reason: "会话和运维智能体不会调用模型", status: 403 };
@@ -295,24 +578,88 @@ export async function postRequirementMessage(
   }
   const sessionId = await ownSession(database, project.id, actor.username);
   await database.query(
-    `insert into requirement_messages (id, session_id, user_id, body, created_at)
-     values (gen_random_uuid(), $1, (select id from users where username = $2), $3, now())`,
+    `insert into requirement_messages (id, session_id, user_id, body, role, created_at)
+     values (gen_random_uuid(), $1, (select id from users where username = $2), $3, 'user', now())`,
     [sessionId, actor.username, text],
   );
-  return { stored: true };
+  const history = await database.query<{ role: string; body: string }>(
+    "select role, body from requirement_messages where session_id = $1 order by created_at desc limit 40",
+    [sessionId],
+  );
+  const messages: ChatMessage[] = [
+    { role: "system", content: await requirementSystemPrompt(database, project.id, projectCode, text) },
+    ...history.rows
+      .slice()
+      .reverse()
+      .map((row): ChatMessage => (row.role === "assistant" ? { role: "assistant", content: row.body } : { role: "user", content: row.body })),
+  ];
+  const model = options.model ?? createModelClient();
+  const tools = sessionToolDefinitions();
+  let reply = "";
+  for (let round = 0; round < 4; round += 1) {
+    const result = await model({
+      config: { baseUrl: config["model.baseUrl"], name: config["model.name"], apiKey: config["model.apiKey"] },
+      messages,
+      tools,
+    });
+    if ("reason" in result) {
+      return { reason: result.reason, status: 502 };
+    }
+    const message = result.message;
+    if (!message.tool_calls || message.tool_calls.length === 0) {
+      reply = message.content ?? "";
+      break;
+    }
+    messages.push({ role: "assistant", content: message.content ?? null, tool_calls: message.tool_calls });
+    for (const call of message.tool_calls) {
+      const outcome = await invokeSessionTool(database, actor, projectCode, call, options.executor);
+      messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(outcome) });
+    }
+  }
+  if (reply.trim()) {
+    await database.query(
+      `insert into requirement_messages (id, session_id, user_id, body, role, created_at)
+       values (gen_random_uuid(), $1, (select id from users where username = $2), $3, 'assistant', now())`,
+      [sessionId, actor.username, reply],
+    );
+  }
+  return { stored: true, reply };
+}
+
+async function invokeSessionTool(
+  database: SystemDatabase,
+  actor: PublicUser,
+  projectCode: string,
+  call: ToolCall,
+  executor?: TestExecutor,
+): Promise<unknown> {
+  let args: Record<string, unknown> = {};
+  try {
+    args = call.function.arguments ? (JSON.parse(call.function.arguments) as Record<string, unknown>) : {};
+  } catch {
+    return { reason: "工具参数不是合法 JSON", status: 400 };
+  }
+  if (call.function.name === "create_project") {
+    return createProject(database, actor, {
+      name: typeof args.name === "string" ? args.name : "",
+      code: typeof args.code === "string" ? args.code : undefined,
+      containerGroup: typeof args.containerGroup === "string" ? args.containerGroup : undefined,
+    });
+  }
+  return applyTool(database, actor, projectCode, { name: call.function.name, arguments: args }, executor);
 }
 
 export async function listRequirementMessages(
   database: SystemDatabase,
   actor: PublicUser,
   projectCode: string,
-): Promise<{ messages: { body: string }[] } | { reason: string; status: number }> {
+): Promise<{ messages: { role: string; body: string }[] } | { reason: string; status: number }> {
   const project = await memberProject(database, actor, projectCode);
   if ("reason" in project) {
     return project;
   }
-  const found = await database.query<{ body: string }>(
-    `select requirement_messages.body
+  const found = await database.query<{ role: string; body: string }>(
+    `select requirement_messages.role, requirement_messages.body
      from requirement_messages
      join requirement_sessions on requirement_sessions.id = requirement_messages.session_id
      join users on users.id = requirement_sessions.user_id
@@ -328,8 +675,8 @@ export async function applyTool(
   actor: PublicUser,
   projectCode: string,
   call: { name?: string; arguments?: Record<string, unknown> },
-  executor: TestExecutor = defaultTestExecutor(),
-): Promise<{ recorded: true } | { reason: string; status: number } | TestRunResult> {
+  executor?: TestExecutor,
+): Promise<{ recorded: true } | { reason: string; status: number } | TestRunResult | { runId: string; status: string; node: string }> {
   const name = call.name ?? "";
   const args = call.arguments ?? {};
   if (name === "run_tests") {
@@ -345,6 +692,9 @@ export async function applyTool(
     if (!config["test.nodePool"].trim()) {
       return { reason: "测试节点池为空", status: 409 };
     }
+    if (!executor) {
+      return dispatchProjectTestRun(database, { id: project.id, code: projectCode });
+    }
     return runProjectTests(database, { id: project.id, code: projectCode }, executor);
   }
   if (name === "replay_test") {
@@ -355,6 +705,9 @@ export async function applyTool(
     const recordId = stringArg(args.record);
     if (!recordId) {
       return { reason: "缺少测试记录", status: 400 };
+    }
+    if (!executor) {
+      return dispatchReplayTestRun(database, { id: project.id, code: projectCode }, recordId);
     }
     return replayTestRun(database, { id: project.id, code: projectCode }, recordId, executor);
   }
@@ -368,8 +721,8 @@ export async function applyTool(
   }
   if (name === "grant_role") {
     const result = await grantAccess(database, actor, projectCode, {
-      principalType: "role",
-      principalName: stringArg(args.role),
+      principalType: stringArg(args.principalType) === "user" ? "user" : "role",
+      principalName: stringArg(args.principalName) || stringArg(args.role),
       menu: stringArg(args.menu),
       actions: Array.isArray(args.actions) ? args.actions.map(String) : [],
     });

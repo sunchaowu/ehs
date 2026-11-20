@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// 串行全套时容器负载会让该用例逼近默认 5 秒超时。
+vi.setConfig({ testTimeout: 15_000 });
 import { openDatabase } from "../src/database.js";
 import { installInitialAdmin } from "../src/install-admin.js";
 import { buildServer } from "../src/server.js";
@@ -26,6 +29,11 @@ describe("system config", () => {
     await database.query("delete from users");
     await database.close();
     const installed = await installInitialAdmin(databaseUrl!, input);
+    // installInitialAdmin 不覆盖已有配置；串行跑全套时必须显式恢复注册开关。
+    const configured = await openDatabase(databaseUrl!);
+    const initialConfig = await configured.readConfig();
+    await configured.saveConfig({ ...initialConfig, "registration.enabled": true });
+    await configured.close();
     app = await buildServer({ databaseUrl });
     const registered = await app.inject({
       method: "POST",

@@ -156,3 +156,32 @@ export async function createUser(
 export async function disableUser(database: SystemDatabase, username: string): Promise<void> {
   await database.query("update users set disabled = true where username = $1", [username]);
 }
+
+export type ManagedUser = {
+  username: string;
+  displayName: string;
+  language: string;
+  platformAdmin: boolean;
+  disabled: boolean;
+  wechatBound: boolean;
+};
+
+/** 平台管理员的用户列表；不返回密码哈希。 */
+export async function listUsers(database: SystemDatabase): Promise<ManagedUser[]> {
+  const found = await database.query<UserRow>(
+    `select id, username, display_name, password_hash, disabled, language, wechat_open_id, platform_admin
+     from users order by username`,
+  );
+  return found.rows.map((row) => ({
+    username: row.username,
+    displayName: row.display_name,
+    language: row.language,
+    platformAdmin: row.platform_admin,
+    disabled: row.disabled,
+    wechatBound: row.wechat_open_id !== null,
+  }));
+}
+
+export async function setUserDisabled(database: SystemDatabase, username: string, disabled: boolean): Promise<void> {
+  await database.query("update users set disabled = $1 where username = $2", [disabled, username]);
+}

@@ -6,6 +6,7 @@ services:
     volumes:
       - ./Caddyfile.server:/etc/caddy/Caddyfile.server:ro
   registry:
+    restart: unless-stopped
     image: docker.io/library/registry:2
     environment:
       REGISTRY_HTTP_ADDR: ":5000"
@@ -26,6 +27,10 @@ services:
       POSTGRES_USER: platform
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: platform
+    # 系统库数据固定存放在命名卷，初始化一次后重启、重建容器都不会改变，
+    # 也避免匿名卷被 docker volume prune 清掉后重新初始化管理员。
+    volumes:
+      - system-db-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U platform -d platform"]
       interval: 2s
@@ -43,15 +48,17 @@ services:
       DATABASE_PROD_ADMIN_URL: ${DATABASE_PROD_ADMIN_URL}
       DATABASE_TEST_ADMIN_URL: ${DATABASE_TEST_ADMIN_URL}
       REGISTRY_ADDRESS: ${REGISTRY_ADDRESS}
+      # 默认不重置管理员密码；只有显式设置 ADMIN_RESET=1 才会重置。
       ADMIN_RESET: ${ADMIN_RESET:-}
+    # 平台接口触发的镜像构建需要宿主 Docker。挂载套接字等同宿主 root 权限，
+    # 只允许部署在受控的运行区服务器，不放到接入区。
     volumes:
-      # 生成器在系统运行区调用本机 Docker 构建候选镜像：只给客户端和套接字，不装守护进程。
       - /var/run/docker.sock:/var/run/docker.sock
-      - /usr/bin/docker:/usr/local/bin/docker:ro
   portal:
     build:
       context: ../apps/portal
       dockerfile: Dockerfile
 
 volumes:
-  registry-data:
+  registry-data: {}
+  system-db-data: {}

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -36,6 +37,8 @@ export function nodeInstallScript(input: {
   privateKey: string;
   caCertificate: string;
 }): string {
+  const agentSource = readFileSync(new URL("./node-agent-template.mjs", import.meta.url), "utf8");
+  const runnerSource = readFileSync(new URL("./test-runner.mjs", import.meta.url), "utf8");
   return `#!/bin/sh
 set -eu
 node_name='${input.nodeName}'
@@ -53,60 +56,21 @@ cat > "$dir/ca.crt" <<'CA'
 ${input.caCertificate}
 CA
 cat > "$dir/agent.mjs" <<'AGENT'
-import { spawn } from "node:child_process";
-const nodeName = process.env.PLATFORM_NODE_NAME;
-const base = process.env.PLATFORM_CONTROL_PLANE_URL;
-const token = process.env.PLATFORM_NODE_TOKEN;
-async function request(path, init = {}) {
-  const response = await fetch(base + path, {
-    ...init,
-    headers: { authorization: "Bearer " + token, ...(init.headers || {}) },
-  });
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
-  return response.headers.get("content-type")?.includes("json") ? response.json() : response.text();
-}
-function docker(args) {
-  return new Promise((resolve) => {
-    const child = spawn("docker", args, { windowsHide: true });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => { stdout += chunk; });
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
-    child.on("error", (error) => resolve({ code: 1, stderr: error.message, stdout }));
-    child.on("close", (code) => resolve({ code: code ?? 1, stderr, stdout }));
-  });
-}
-async function cycle() {
-  const desired = await request("/api/nodes/" + nodeName + "/desired");
-  const projects = [];
-  for (const item of desired.projects || []) {
-    const pulled = await docker(["pull", item.imageDigest]);
-    if (pulled.code !== 0) {
-      projects.push({ code: item.code, running: false, databaseConnected: false, imageDigest: "", reason: (pulled.stderr || pulled.stdout || "镜像拉取失败").trim() });
-      continue;
-    }
-    await docker(["rm", "-f", "platform-" + item.code]);
-    const started = await docker(["run", "-d", "--name", "platform-" + item.code, "-e", "DATABASE_NAME=" + item.databaseName, "-e", "runtime.mode=prod", item.imageDigest]);
-    if (started.code !== 0) {
-      projects.push({ code: item.code, running: false, databaseConnected: false, imageDigest: item.imageDigest, reason: (started.stderr || started.stdout || "容器启动失败").trim() });
-      continue;
-    }
-    projects.push({ code: item.code, running: true, databaseConnected: true, imageDigest: item.imageDigest });
-  }
-  await request("/api/nodes/" + nodeName + "/health", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projects }) });
-}
-while (true) {
-  try { await cycle(); } catch (_) {}
-  await new Promise((resolve) => setTimeout(resolve, 30000));
-}
+${agentSource}
 AGENT
+cat > "$dir/test-runner.mjs" <<'RUNNER'
+${runnerSource}
+RUNNER
 export PLATFORM_NODE_NAME="$node_name"
 export PLATFORM_CONTROL_PLANE_URL="$base"
 export PLATFORM_NODE_TOKEN="$token"
 export PLATFORM_NODE_DIR="$dir"
 # mTLS material: client.crt client.key ca.crt
+# 项目数据库连接串放在本机 $dir/database.url，用 {database} 占位数据库名；
+# 也可以用 PLATFORM_DATABASE_URL_TEMPLATE 覆盖。安装脚本不写数据库地址。
+# 测试任务由控制面通过 /desired 下发，代理在测试容器内运行白盒入口并回报步骤。
+# 入口网关默认监听 8081，并上报本机非回环 IPv4；
+# 可用 PLATFORM_NODE_GATEWAY_PORT、PLATFORM_NODE_ADDRESS、PLATFORM_NODE_GATEWAY_URL 覆盖。
 exec node "$dir/agent.mjs"
 `;
 }

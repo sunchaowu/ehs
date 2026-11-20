@@ -39,10 +39,25 @@ export type TestOverview = {
   runs: TestRunSummary[];
 };
 
+/** 节点失联或任务卡住时，按运行时限把测试任务和运行标记为失败。 */
+export async function expireStaleTestJobs(database: SystemDatabase): Promise<void> {
+  const stale = await database.query<{ run_id: string }>(
+    `update test_jobs
+     set status = 'done', finished_at = now(), failure = '测试节点未在时限内回报'
+     where status = 'running' and claimed_at is not null
+       and claimed_at + make_interval(secs => run_timeout_seconds) < now()
+     returning run_id`,
+  );
+  for (const row of stale.rows) {
+    await finishRun(database, row.run_id, "failed", "测试节点未在时限内回报");
+  }
+}
+
 export async function readTestOverview(
   database: SystemDatabase,
   projectId: string,
 ): Promise<TestOverview> {
+  await expireStaleTestJobs(database);
   const candidateDigest = await latestImageDigest(database, projectId);
   const cases = await listTestCases(database, projectId);
   const runs = await database.query<{
@@ -174,15 +189,31 @@ export type TestRunResult =
     }
   | { reason: string; status: number };
 
-export async function runProjectTests(
-  database: SystemDatabase,
-  project: { id: string; code: string },
-  executor: TestExecutor,
-): Promise<TestRunResult> {
-  const digest = await latestImageDigest(database, project.id);
-  if (!digest) {
-    return { reason: "还没有候选镜像", status: 409 };
-  }
+export type TestRunPreparation = {
+  runId: string;
+  digest: string;
+  databaseName: string;
+  cases: StoredTestCase[];
+  stepTimeoutSeconds: number;
+  runTimeoutSeconds: number;
+  modelBaseUrl: string;
+  modelName: string;
+  modelApiKey: string;
+  replayedFrom: string | null;
+  replayedFromDigest: string | null;
+};
+
+async function readTestConfig(database: SystemDatabase): Promise<
+  | {
+      testAdminUrl: string;
+      stepTimeoutSeconds: number;
+      runTimeoutSeconds: number;
+      modelBaseUrl: string;
+      modelName: string;
+      modelApiKey: string;
+    }
+  | { reason: string; status: number }
+> {
   const config = await database.readConfig();
   if (poolNames(config["test.nodePool"]).length === 0) {
     return { reason: "测试节点池为空", status: 409 };
@@ -190,8 +221,34 @@ export async function runProjectTests(
   if (!config["database.testAdminUrl"]) {
     return { reason: "测试库未配置", status: 409 };
   }
+  return {
+    testAdminUrl: config["database.testAdminUrl"],
+    stepTimeoutSeconds: config["test.stepTimeoutSeconds"],
+    runTimeoutSeconds: config["test.runTimeoutSeconds"],
+    modelBaseUrl: config["model.baseUrl"],
+    modelName: config["model.name"],
+    modelApiKey: config["model.apiKey"],
+  };
+}
+
+/**
+ * 创建测试运行并重建测试库，供同步执行器和测试节点任务共用。
+ * 调用方负责最终写入步骤并把运行标记为完成或失败。
+ */
+export async function prepareProjectTestRun(
+  database: SystemDatabase,
+  project: { id: string; code: string },
+): Promise<TestRunPreparation | { reason: string; status: number }> {
+  const digest = await latestImageDigest(database, project.id);
+  if (!digest) {
+    return { reason: "还没有候选镜像", status: 409 };
+  }
+  const config = await readTestConfig(database);
+  if ("reason" in config) {
+    return config;
+  }
   const databaseName = projectDatabaseName("tst", project.code);
-  const rebuilt = await rebuildPostgresDatabase({ adminUrl: config["database.testAdminUrl"], databaseName });
+  const rebuilt = await rebuildPostgresDatabase({ adminUrl: config.testAdminUrl, databaseName });
   if ("reason" in rebuilt) {
     return { reason: rebuilt.reason, status: 409 };
   }
@@ -201,30 +258,26 @@ export async function runProjectTests(
     await finishRun(database, runId, "failed", "没有测试案例");
     return { reason: "没有测试案例", status: 409 };
   }
-  const result = await executor({
-    projectCode: project.code,
-    imageDigest: digest,
+  return {
+    runId,
+    digest,
     databaseName,
     cases,
-    stepTimeoutSeconds: config["test.stepTimeoutSeconds"],
-    runTimeoutSeconds: config["test.runTimeoutSeconds"],
-    modelBaseUrl: config["model.baseUrl"],
-    modelName: config["model.name"],
-    modelApiKey: config["model.apiKey"],
-  });
-  if ("reason" in result) {
-    await finishRun(database, runId, "failed", result.reason);
-    return { reason: result.reason, status: 409 };
-  }
-  return finishRunWithSteps(database, runId, digest, result.steps, cases, null, null);
+    stepTimeoutSeconds: config.stepTimeoutSeconds,
+    runTimeoutSeconds: config.runTimeoutSeconds,
+    modelBaseUrl: config.modelBaseUrl,
+    modelName: config.modelName,
+    modelApiKey: config.modelApiKey,
+    replayedFrom: null,
+    replayedFromDigest: null,
+  };
 }
 
-export async function replayTestRun(
+export async function prepareReplayTestRun(
   database: SystemDatabase,
   project: { id: string; code: string },
   runId: string,
-  executor: TestExecutor,
-): Promise<TestRunResult> {
+): Promise<TestRunPreparation | { reason: string; status: number }> {
   const digest = await latestImageDigest(database, project.id);
   const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const found = uuidPattern.test(runId)
@@ -240,14 +293,12 @@ export async function replayTestRun(
   if (!digest) {
     return { reason: "还没有候选镜像", status: 409 };
   }
-  const config = await database.readConfig();
-  if (poolNames(config["test.nodePool"]).length === 0) {
-    return { reason: "测试节点池为空", status: 409 };
+  const config = await readTestConfig(database);
+  if ("reason" in config) {
+    return config;
   }
-  if (!config["database.testAdminUrl"]) {
-    return { reason: "测试库未配置", status: 409 };
-  }
-  const rebuilt = await rebuildPostgresDatabase({ adminUrl: config["database.testAdminUrl"], databaseName: projectDatabaseName("tst", project.code) });
+  const databaseName = projectDatabaseName("tst", project.code);
+  const rebuilt = await rebuildPostgresDatabase({ adminUrl: config.testAdminUrl, databaseName });
   if ("reason" in rebuilt) {
     return { reason: rebuilt.reason, status: 409 };
   }
@@ -293,22 +344,92 @@ export async function replayTestRun(
   }
   const cases = [...grouped.values()];
   const newRunId = await startRun(database, project.id, digest, original.id, original.image_digest);
+  return {
+    runId: newRunId,
+    digest,
+    databaseName,
+    cases,
+    stepTimeoutSeconds: config.stepTimeoutSeconds,
+    runTimeoutSeconds: config.runTimeoutSeconds,
+    modelBaseUrl: config.modelBaseUrl,
+    modelName: config.modelName,
+    modelApiKey: config.modelApiKey,
+    replayedFrom: original.id,
+    replayedFromDigest: original.image_digest,
+  };
+}
+
+export async function runProjectTests(
+  database: SystemDatabase,
+  project: { id: string; code: string },
+  executor: TestExecutor,
+): Promise<TestRunResult> {
+  const prepared = await prepareProjectTestRun(database, project);
+  if ("reason" in prepared) {
+    return prepared;
+  }
   const result = await executor({
     projectCode: project.code,
-    imageDigest: digest,
-    databaseName: projectDatabaseName("tst", project.code),
-    cases,
-    stepTimeoutSeconds: config["test.stepTimeoutSeconds"],
-    runTimeoutSeconds: config["test.runTimeoutSeconds"],
-    modelBaseUrl: config["model.baseUrl"],
-    modelName: config["model.name"],
-    modelApiKey: config["model.apiKey"],
+    imageDigest: prepared.digest,
+    databaseName: prepared.databaseName,
+    cases: prepared.cases,
+    stepTimeoutSeconds: prepared.stepTimeoutSeconds,
+    runTimeoutSeconds: prepared.runTimeoutSeconds,
+    modelBaseUrl: prepared.modelBaseUrl,
+    modelName: prepared.modelName,
+    modelApiKey: prepared.modelApiKey,
   });
+  return completeTestRun(database, prepared, result, prepared.replayedFrom, prepared.replayedFromDigest);
+}
+
+export async function replayTestRun(
+  database: SystemDatabase,
+  project: { id: string; code: string },
+  runId: string,
+  executor: TestExecutor,
+): Promise<TestRunResult> {
+  const prepared = await prepareReplayTestRun(database, project, runId);
+  if ("reason" in prepared) {
+    return prepared;
+  }
+  const result = await executor({
+    projectCode: project.code,
+    imageDigest: prepared.digest,
+    databaseName: prepared.databaseName,
+    cases: prepared.cases,
+    stepTimeoutSeconds: prepared.stepTimeoutSeconds,
+    runTimeoutSeconds: prepared.runTimeoutSeconds,
+    modelBaseUrl: prepared.modelBaseUrl,
+    modelName: prepared.modelName,
+    modelApiKey: prepared.modelApiKey,
+  });
+  return completeTestRun(database, prepared, result, prepared.replayedFrom, prepared.replayedFromDigest);
+}
+
+export async function completeTestRun(
+  database: SystemDatabase,
+  prepared: Pick<TestRunPreparation, "runId" | "digest" | "cases">,
+  result: { steps: TestStepOutcome[] } | { reason: string },
+  replayedFrom: string | null,
+  replayedFromDigest: string | null,
+): Promise<TestRunResult> {
   if ("reason" in result) {
-    await finishRun(database, newRunId, "failed", result.reason);
+    await finishRun(database, prepared.runId, "failed", result.reason);
     return { reason: result.reason, status: 409 };
   }
-  return finishRunWithSteps(database, newRunId, digest, result.steps, cases, original.id, original.image_digest);
+  return finishRunWithSteps(
+    database,
+    prepared.runId,
+    prepared.digest,
+    result.steps,
+    prepared.cases,
+    replayedFrom,
+    replayedFromDigest,
+  );
+}
+
+export async function failTestRun(database: SystemDatabase, runId: string, reason: string): Promise<void> {
+  await finishRun(database, runId, "failed", reason);
 }
 
 async function startRun(

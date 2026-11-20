@@ -16,7 +16,8 @@ export async function installInitialAdmin(
     testAdminUrl: input.testAdminUrl,
     registryAddress: input.registryAddress,
   });
-  await database.saveConfig(config);
+  // 只补齐缺失的配置项，重复安装或发布不能覆盖管理员已经保存的配置。
+  await database.saveConfigDefaults(config);
   const existing = await database.query("select id from users where username = 'admin'");
   if (existing.rows.length > 0 && !input.reset) {
     await database.close();

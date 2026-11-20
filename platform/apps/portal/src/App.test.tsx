@@ -149,6 +149,85 @@ describe("portal shell", () => {
     vi.unstubAllGlobals();
   });
 
+  it("shows the real solution diff and confirms the draft", async () => {
+    const requests: Array<{ url: string; method?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: { method?: string }) => {
+        const target = String(url);
+        requests.push({ url: target, method: init?.method });
+        if (target === "/api/projects") {
+          return { ok: true, json: async () => ({ project: { name: "请假审批", code: "qing-jia-shen-pi" } }) };
+        }
+        if (target.endsWith("/change")) {
+          return {
+            ok: true,
+            json: async () => ({
+              change: {
+                added: { menus: [{ code: "qing-jia-dan", name: "请假单", parent_code: null }], grants: [] },
+                modified: [
+                  {
+                    kind: "grant",
+                    principal_type: "role",
+                    principal_name: "审批人",
+                    menu_code: "qing-jia-dan",
+                    added_actions: ["修改"],
+                    removed_actions: ["访问"],
+                  },
+                ],
+                removed: { menus: [{ code: "gong-gao", name: "公告", parent_code: null }], grants: [] },
+              },
+            }),
+          };
+        }
+        if (target.endsWith("/confirm") && init?.method === "POST") {
+          return { ok: true, json: async () => ({ sourceRevision: "sha256:abc" }) };
+        }
+        return { ok: true, json: async () => ({}) };
+      }),
+    );
+    render(<App session={admin} title="企业应用平台" />);
+    fireEvent.click(screen.getByTestId("platform/project/new"));
+    fireEvent.change(screen.getByTestId("platform/project/name"), { target: { value: "请假审批" } });
+    fireEvent.click(screen.getByTestId("platform/project/save"));
+    fireEvent.click(await screen.findByTestId("platform/project/solution"));
+    expect(await screen.findByTestId("platform/solution/page")).toHaveTextContent("方案确认");
+    expect(await screen.findByTestId("platform/solution/added-menu")).toHaveTextContent("请假单（qing-jia-dan）");
+    expect(screen.getByTestId("platform/solution/modified-item")).toHaveTextContent("新增动作 修改；移除动作 访问");
+    expect(screen.getByTestId("platform/solution/removed-menu")).toHaveTextContent("公告（gong-gao）");
+    expect(requests.some((item) => item.url.endsWith("/change") && item.method === undefined)).toBe(true);
+    fireEvent.click(screen.getByTestId("platform/solution/confirm"));
+    expect(await screen.findByText("方案已确认，源码版本 sha256:abc")).toBeInTheDocument();
+    expect(requests.some((item) => item.url.endsWith("/confirm") && item.method === "POST")).toBe(true);
+    fireEvent.click(screen.getByTestId("platform/solution/back"));
+    expect(await screen.findByTestId("platform/project/draft")).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+
+  it("lists projects on the workbench and restores the last opened one after a refresh", async () => {
+    localStorage.clear();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/projects") {
+        return {
+          ok: true,
+          json: async () => ({ projects: [{ name: "请假审批", code: "qing-jia-shen-pi", containerGroup: "qing-jia-shen-pi", projectAdmin: true }] }),
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App session={admin} title="企业应用平台" />);
+    expect(await screen.findByTestId("platform/project/list")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("platform/project/open"));
+    expect(await screen.findByTestId("platform/project/draft")).toBeInTheDocument();
+    // 模拟刷新页面：重新挂载后应自动恢复上次打开的项目
+    cleanup();
+    render(<App session={admin} title="企业应用平台" />);
+    expect(await screen.findByTestId("platform/project/draft")).toBeInTheDocument();
+    localStorage.clear();
+    vi.unstubAllGlobals();
+  });
+
   it("shows a node that has not reported healthy on the release check", async () => {
     vi.stubGlobal(
       "fetch",
@@ -198,6 +277,7 @@ describe("portal shell", () => {
     expect(summary).toHaveTextContent("容器组 leave");
     expect(summary).toHaveTextContent("同组项目 请假");
     expect(summary).toHaveTextContent("设计 入库");
+    expect(screen.getByTestId("platform/project/open-entry")).toHaveAttribute("href", "/p/stock");
     expect(summary).toHaveTextContent("测试未设为发布门槛");
     vi.unstubAllGlobals();
   });
@@ -366,6 +446,218 @@ describe("portal shell", () => {
         requests.some((request) => request.url === "/api/plugins/portal-notice/config" && request.body?.includes("停机维护")),
       ).toBe(true);
     });
+    vi.unstubAllGlobals();
+  });
+
+  it("reports whether personal settings were saved", async () => {
+    const requests: Array<{ body?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: { body?: string }) => {
+        requests.push({ body: init?.body });
+        return { ok: true, json: async () => ({ user: admin }) };
+      }),
+    );
+    render(<App session={admin} title="企业应用平台" section="account" />);
+    fireEvent.change(screen.getByTestId("platform/account/password"), { target: { value: "  new-secret  " } });
+    fireEvent.click(screen.getByTestId("platform/account/save"));
+    expect(await screen.findByTestId("platform/account/feedback")).toHaveTextContent("已保存，下次登录请使用新密码");
+    expect(requests.map((item) => item.body).find(Boolean)).toBe(JSON.stringify({ displayName: "管理员", language: "zh-CN", password: "new-secret" }));
+    vi.unstubAllGlobals();
+  });
+
+  it("lists users and lets an administrator create and toggle accounts", async () => {
+    const requests: Array<{ url: string; method?: string; body?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
+        const target = String(url);
+        requests.push({ url: target, method: init?.method, body: init?.body });
+        if (target === "/api/users" && !init?.method) {
+          return {
+            ok: true,
+            json: async () => ({
+              users: [
+                { username: "admin", displayName: "管理员", language: "zh-CN", platformAdmin: true, disabled: false, wechatBound: false },
+                { username: "alice", displayName: "爱丽丝", language: "zh-CN", platformAdmin: false, disabled: true, wechatBound: false },
+              ],
+            }),
+          };
+        }
+        return { ok: true, json: async () => ({ projects: [] }) };
+      }),
+    );
+    render(<App session={admin} title="企业应用平台" />);
+    expect(screen.getByTestId("platform/shell/nav-users")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("platform/shell/nav-users"));
+    expect(await screen.findByTestId("platform/users/page")).toHaveTextContent("共 2 名用户");
+    expect(screen.getByTestId("platform/users/row-alice")).toHaveTextContent("爱丽丝（alice）");
+    expect(screen.getByTestId("platform/users/state-alice")).toHaveTextContent("已停用");
+
+    fireEvent.click(screen.getByTestId("platform/users/toggle-alice"));
+    await vi.waitFor(() => {
+      expect(requests.some((item) => item.url === "/api/users/alice/enable" && item.method === "POST")).toBe(true);
+    });
+
+    fireEvent.change(screen.getByTestId("platform/users/username"), { target: { value: "bob" } });
+    fireEvent.change(screen.getByTestId("platform/users/display-name"), { target: { value: "鲍勃" } });
+    fireEvent.change(screen.getByTestId("platform/users/password"), { target: { value: "secret-pass" } });
+    fireEvent.click(screen.getByTestId("platform/users/create"));
+    await vi.waitFor(() => {
+      expect(
+        requests.some(
+          (item) =>
+            item.url === "/api/users" &&
+            item.method === "POST" &&
+            item.body === '{"username":"bob","displayName":"鲍勃","password":"secret-pass"}',
+        ),
+      ).toBe(true);
+    });
+    expect(await screen.findByTestId("platform/users/feedback")).toHaveTextContent("bob 已创建");
+    vi.unstubAllGlobals();
+  });
+
+  it("manages project members, roles and grants from the project page", async () => {
+    const requests: Array<{ url: string; method?: string; body?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
+        const target = String(url);
+        requests.push({ url: target, method: init?.method, body: init?.body });
+        if (target === "/api/projects") {
+          return { ok: true, json: async () => ({ project: { name: "请假审批", code: "qing-jia-shen-pi" } }) };
+        }
+        if (target.endsWith("/members") && !init?.method) {
+          return {
+            ok: true,
+            json: async () => ({
+              members: [
+                { username: "admin", displayName: "管理员", projectAdmin: true },
+                { username: "alice", displayName: "爱丽丝", projectAdmin: false },
+              ],
+            }),
+          };
+        }
+        if (target.endsWith("/grants") && !init?.method) {
+          return {
+            ok: true,
+            json: async () => ({
+              access: {
+                menus: [{ code: "qing-jia-dan", name: "请假单", parent_code: null }],
+                roles: [{ name: "审批人", members: ["alice"] }],
+                grants: [
+                  { principal_type: "role", principal_name: "审批人", menu_code: "qing-jia-dan", action: "访问" },
+                  { principal_type: "user", principal_name: "alice", menu_code: "qing-jia-dan", action: "访问" },
+                ],
+              },
+            }),
+          };
+        }
+        return { ok: true, json: async () => ({}) };
+      }),
+    );
+    render(<App session={admin} title="企业应用平台" />);
+    fireEvent.click(screen.getByTestId("platform/project/new"));
+    expect(screen.getByTestId("platform/project/code-hint")).toHaveTextContent("^[a-z][a-z0-9-]{0,62}$");
+    expect(screen.getByTestId("platform/project/code")).toHaveAttribute("placeholder", "例如 qing-jia-shen-pi");
+    fireEvent.change(screen.getByTestId("platform/project/name"), { target: { value: "请假审批" } });
+    fireEvent.click(screen.getByTestId("platform/project/save"));
+    fireEvent.click(await screen.findByTestId("platform/project/access"));
+    expect(await screen.findByTestId("platform/access/page")).toHaveTextContent("授权管理");
+    expect(screen.getByTestId("platform/access/member-row-alice")).toHaveTextContent("爱丽丝（alice）");
+    expect(screen.getByTestId("platform/access/role-row-审批人")).toHaveTextContent("alice");
+    expect(screen.getByTestId("platform/access/grant-row-user-alice-qing-jia-dan-访问")).toHaveTextContent("用户 alice");
+
+    fireEvent.click(screen.getByTestId("platform/access/grant-remove-user-alice-qing-jia-dan-访问"));
+    await vi.waitFor(() => {
+      expect(
+        requests.some((item) => item.url.endsWith("/grants") && item.method === "DELETE" && item.body?.includes('"principalName":"alice"')),
+      ).toBe(true);
+    });
+    fireEvent.click(screen.getByTestId("platform/access/member-remove-alice"));
+    await vi.waitFor(() => {
+      expect(requests.some((item) => item.url.endsWith("/members/alice") && item.method === "DELETE")).toBe(true);
+    });
+    fireEvent.click(screen.getByTestId("platform/access/role-unassign-审批人-alice"));
+    await vi.waitFor(() => {
+      expect(
+        requests.some((item) => item.url.endsWith("/roles/assign") && item.method === "DELETE" && item.body?.includes('"role":"审批人"')),
+      ).toBe(true);
+    });
+    fireEvent.click(screen.getByTestId("platform/access/back"));
+    expect(await screen.findByTestId("platform/project/draft")).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+
+  it("lists nodes and lets an administrator register, pool, rotate and remove nodes", async () => {
+    const requests: Array<{ url: string; method?: string; body?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
+        const target = String(url);
+        requests.push({ url: target, method: init?.method, body: init?.body });
+        if (target === "/api/nodes" && !init?.method) {
+          return {
+            ok: true,
+            json: async () => ({
+              nodes: [
+                { name: "prod-1", zone: "正式区", pool: "prod", reportedAt: "2026-11-20T06:00:00.000Z", projectCount: 2, gateway: "http://172.18.0.9:8081" },
+                { name: "test-1", zone: "测试区", pool: "test", reportedAt: null, projectCount: 0, gateway: "" },
+              ],
+            }),
+          };
+        }
+        if (target === "/api/nodes" && init?.method === "POST") {
+          return { ok: true, json: async () => ({ node: { name: "test-2", zone: "测试区", pool: "" }, token: "new-token" }) };
+        }
+        if (target.endsWith("/rotate-token")) {
+          return { ok: true, json: async () => ({ name: "test-1", token: "rotated-token" }) };
+        }
+        return { ok: true, json: async () => ({}) };
+      }),
+    );
+    render(<App session={admin} title="企业应用平台" />);
+    expect(screen.getByTestId("platform/shell/nav-nodes")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("platform/shell/nav-nodes"));
+    expect(await screen.findByTestId("platform/nodes/page")).toHaveTextContent("共 2 个节点");
+    expect(screen.getByTestId("platform/nodes/pool-prod-1")).toHaveTextContent("正式池");
+    expect(screen.getByTestId("platform/nodes/health-prod-1")).toHaveTextContent("2 个项目");
+    expect(screen.getByTestId("platform/nodes/zone-test-1")).toHaveTextContent("测试区");
+    expect(screen.getByTestId("platform/nodes/health-test-1")).toHaveTextContent("尚未上报心跳");
+    expect(screen.getByTestId("platform/nodes/install-test-1")).toHaveAttribute("href", "/api/nodes/test-1/install");
+
+    fireEvent.change(screen.getByTestId("platform/nodes/name"), { target: { value: "test-2" } });
+    fireEvent.click(screen.getByTestId("platform/nodes/create"));
+    expect(await screen.findByTestId("platform/nodes/token")).toHaveTextContent("new-token");
+    await vi.waitFor(() => {
+      expect(
+        requests.some((item) => item.url === "/api/nodes" && item.method === "POST" && item.body === '{"name":"test-2","zone":"测试区"}'),
+      ).toBe(true);
+    });
+
+    fireEvent.click(screen.getByTestId("platform/nodes/pool-test-test-1"));
+    await vi.waitFor(() => {
+      expect(requests.some((item) => item.url === "/api/nodes/test-1/pool" && item.method === "PUT" && item.body === '{"pool":""}')).toBe(true);
+    });
+
+    fireEvent.click(screen.getByTestId("platform/nodes/rotate-test-1"));
+    expect(await screen.findByTestId("platform/nodes/token")).toHaveTextContent("rotated-token");
+
+    fireEvent.click(screen.getByTestId("platform/nodes/remove-test-1"));
+    await vi.waitFor(() => {
+      expect(requests.some((item) => item.url === "/api/nodes/test-1" && item.method === "DELETE")).toBe(true);
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("shows the server reason when personal settings are rejected", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: false, json: async () => ({ reason: "请输入显示名和语言" }) })),
+    );
+    render(<App session={admin} title="企业应用平台" section="account" />);
+    fireEvent.click(screen.getByTestId("platform/account/save"));
+    expect(await screen.findByTestId("platform/account/feedback")).toHaveTextContent("请输入显示名和语言");
     vi.unstubAllGlobals();
   });
 });

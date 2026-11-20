@@ -25,9 +25,16 @@ describe("node install script", () => {
     expect(script).toContain("KEY-DATA");
     expect(script).toContain("CA-DATA");
     expect(script).toContain("agent.mjs");
+    expect(script).toContain("test-runner.mjs");
     expect(script).toContain("docker");
+    expect(script).toContain("database.url");
+    expect(script).toContain("PLATFORM_DATABASE_URL_TEMPLATE");
+    expect(script).toContain('health.storage === "postgres"');
+    expect(script).toContain("runtime.mode=test");
     expect(script).not.toContain("postgres://");
-    expect(script).not.toContain("0.0.0.0");
+    expect(script).toContain("127.0.0.1::8080");
+    expect(script).toContain("startGateway");
+    expect(script).toContain("PLATFORM_NODE_GATEWAY_PORT");
   });
 });
 
@@ -55,7 +62,12 @@ describe("shared container publication", () => {
     });
     const configured = await openDatabase(databaseUrl!);
     const config = await configured.readConfig();
-    await configured.saveConfig({ ...config, "test.requirePassBeforePublish": false });
+    await configured.saveConfig({
+      ...config,
+      "test.requirePassBeforePublish": false,
+      "test.nodePool": "",
+      "scheduler.defaultNodePool": "",
+    });
     await configured.close();
     let builtFiles: Record<string, string> = {};
     app = await buildServer({
