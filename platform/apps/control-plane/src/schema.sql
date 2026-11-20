@@ -266,6 +266,10 @@ create table if not exists test_jobs (
 
 alter table test_jobs add column if not exists replayed_from uuid references test_runs (id) on delete set null;
 alter table test_jobs add column if not exists replayed_from_digest text;
+-- 黑盒视觉定位的模型配置随任务下发到测试节点；密钥只在节点任务载荷中出现，不进日志或门户响应。
+alter table test_jobs add column if not exists model_base_url text not null default '';
+alter table test_jobs add column if not exists model_name text not null default '';
+alter table test_jobs add column if not exists model_api_key text not null default '';
 
 create table if not exists portal_notifications (
   id uuid primary key,

@@ -453,4 +453,76 @@ describe("online testing", () => {
     });
     await verified.close();
   }, 120000);
+
+  it("propagates the model config into the node test job payload", async () => {
+    const databaseUrl = process.env.DATABASE_SYSTEM_URL!;
+    const installed = await installAdmin();
+    app = await buildServer({
+      databaseUrl,
+      imageBuilder: async () => ({ digest }),
+      databaseProvisioner: async () => ({ created: true }),
+    });
+    const cookie = await login(app, installed.password);
+    const code = await createProjectWithDesign(app, cookie, "模型配置下发");
+
+    const model = {
+      "model.baseUrl": "http://vllm.internal:8000/v1",
+      "model.name": "qwen2.5-vl",
+      "model.apiKey": "secret-key-for-test",
+    };
+    const configured = await openDatabase(databaseUrl);
+    const config = await configured.readConfig();
+    await configured.saveConfig({ ...config, ...model });
+    await configured.close();
+
+    const registered = await app.inject({
+      method: "POST",
+      url: "/api/nodes",
+      cookies: { platform_session: cookie },
+      payload: { name: "test-1", zone: "测试区" },
+    });
+    expect(registered.statusCode).toBe(201);
+    const token = registered.json().token as string;
+    await app.inject({
+      method: "PUT",
+      url: "/api/nodes/test-1/pool",
+      cookies: { platform_session: cookie },
+      payload: { pool: "test" },
+    });
+
+    const dispatched = await app.inject({
+      method: "POST",
+      url: `/api/projects/${code}/tests`,
+      cookies: { platform_session: cookie },
+    });
+    expect(dispatched.statusCode).toBe(202);
+
+    // 控制面把模型配置随任务落库。
+    const queued = await openDatabase(databaseUrl);
+    const jobs = await queued.query<{ model_base_url: string; model_name: string; model_api_key: string }>(
+      "select model_base_url, model_name, model_api_key from test_jobs",
+    );
+    expect(jobs.rows).toHaveLength(1);
+    expect(jobs.rows[0]).toEqual({
+      model_base_url: model["model.baseUrl"],
+      model_name: model["model.name"],
+      model_api_key: model["model.apiKey"],
+    });
+    await queued.close();
+
+    // 节点通过 /desired 原子领取时，任务载荷含模型配置。
+    const desired = await app.inject({
+      method: "GET",
+      url: "/api/nodes/test-1/desired",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(desired.statusCode).toBe(200);
+    const tests = desired.json().tests as Array<{ modelBaseUrl: string; modelName: string; modelApiKey: string }>;
+    expect(tests).toHaveLength(1);
+    expect(tests[0]).toMatchObject({
+      modelBaseUrl: model["model.baseUrl"],
+      modelName: model["model.name"],
+      modelApiKey: model["model.apiKey"],
+    });
+  }, 120000);
 });

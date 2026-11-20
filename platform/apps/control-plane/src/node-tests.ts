@@ -20,6 +20,9 @@ export type NodeTestJob = {
   cases: StoredTestCase[];
   stepTimeoutSeconds: number;
   runTimeoutSeconds: number;
+  modelBaseUrl: string;
+  modelName: string;
+  modelApiKey: string;
 };
 
 type StoredJobRow = {
@@ -32,6 +35,9 @@ type StoredJobRow = {
   cases: NodeTestJob["cases"];
   step_timeout_seconds: number;
   run_timeout_seconds: number;
+  model_base_url: string;
+  model_name: string;
+  model_api_key: string;
   status: string;
   replayed_from: string | null;
   replayed_from_digest: string | null;
@@ -89,8 +95,8 @@ async function enqueueNodeJob(
   }
   await database.query(
     `insert into test_jobs
-     (id, run_id, node_name, project_code, image_digest, database_name, cases, step_timeout_seconds, run_timeout_seconds, replayed_from, replayed_from_digest, status, created_at)
-     values (gen_random_uuid(), $1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, 'pending', now())`,
+     (id, run_id, node_name, project_code, image_digest, database_name, cases, step_timeout_seconds, run_timeout_seconds, model_base_url, model_name, model_api_key, replayed_from, replayed_from_digest, status, created_at)
+     values (gen_random_uuid(), $1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, 'pending', now())`,
     [
       prepared.runId,
       node,
@@ -100,6 +106,9 @@ async function enqueueNodeJob(
       JSON.stringify(prepared.cases),
       prepared.stepTimeoutSeconds,
       prepared.runTimeoutSeconds,
+      prepared.modelBaseUrl,
+      prepared.modelName,
+      prepared.modelApiKey,
       prepared.replayedFrom,
       prepared.replayedFromDigest,
     ],
@@ -124,7 +133,7 @@ export async function claimTestJobs(database: SystemDatabase, nodeName: string, 
        for update skip locked
      )
      returning id, run_id, node_name, project_code, image_digest, database_name, cases,
-               step_timeout_seconds, run_timeout_seconds, status`,
+               step_timeout_seconds, run_timeout_seconds, model_base_url, model_name, model_api_key, status`,
     [nodeName, limit],
   );
   return claimed.rows.map((row) => ({
@@ -136,6 +145,9 @@ export async function claimTestJobs(database: SystemDatabase, nodeName: string, 
     cases: row.cases,
     stepTimeoutSeconds: row.step_timeout_seconds,
     runTimeoutSeconds: row.run_timeout_seconds,
+    modelBaseUrl: row.model_base_url,
+    modelName: row.model_name,
+    modelApiKey: row.model_api_key,
   }));
 }
 

@@ -355,7 +355,14 @@ export async function runTestJob(job, options = {}) {
     }
     writeFileSync(
       payloadPath,
-      JSON.stringify({ cases: job.cases ?? [], stepTimeoutSeconds: job.stepTimeoutSeconds }),
+      JSON.stringify({
+        cases: job.cases ?? [],
+        stepTimeoutSeconds: job.stepTimeoutSeconds,
+        // 黑盒视觉定位用的模型配置随载荷下发；密钥只进容器临时文件，不写日志。
+        modelBaseUrl: job.modelBaseUrl ?? "",
+        modelName: job.modelName ?? "",
+        modelApiKey: job.modelApiKey ?? "",
+      }),
       "utf8",
     );
     const copiedRunner = await dockerFn(["cp", runnerPath, containerName + ":/tmp/platform-test-runner.mjs"]);

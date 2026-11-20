@@ -3,7 +3,7 @@
 | 项 | 值 |
 |---|---|
 | 文档时间 | 2026-11-20 15:02:45 +0800 |
-| 状态 | 已核对 P0.5 缺口，修复两处白盒/回放缺陷 |
+| 状态 | 已核对 P0.5 缺口，修复两处白盒/回放缺陷，并完成模型配置下发 |
 | 范围 | 在线测试执行器链路盘点 + 可执行缺陷修复；黑盒执行器未实现 |
 | 验证 | 局域网控制面容器 + 独立测试库 `platform_test`，全套 87/87 通过 |
 
@@ -35,6 +35,7 @@ P0.5 的目标是「真实测试执行器」。为确定剩余工作量，对控
 
 ### 部分实现
 
+- **模型配置下发（已修复）**：`test_jobs` 新增 `model_base_url/model_name/model_api_key` 列；`NodeTestJob` 与 `/desired` 的 tests 载荷携带模型配置；节点代理写入 runner payload 时带上同样字段，为视觉定位打通前提。
 - **回放**：同步路径保留来源与来源摘要；异步路径在本次修复后同样保留。
 - **定位记录**：`TestStepOutcome.locator` 契约存在，但白盒写入的是 `step.target`，没有真正的元素定位信息。
 - **安全**：节点仍为 HTTP + Bearer；安装脚本签发的客户端证书只落盘，mTLS 服务端校验未接入。
@@ -44,7 +45,7 @@ P0.5 的目标是「真实测试执行器」。为确定剩余工作量，对控
 
 1. **黑盒执行器**：Midscene.js + Playwright 未安装（`package.json` / lockfile 无依赖，`slots.ts` 中 `attached:false`）；`test-runner.mjs:126-134` 对每个非白盒步骤直接产出 `passed:false` + `reason:"黑盒执行器未配置：Midscene.js 与 Playwright 待接入"`。
 2. **视觉定位链**：稳定标识 → 角色与可访问名称 → 上次成功定位 → 视觉回退的三级策略、`openai-chat` 模型调用、不能看图时说明原因、禁止坐标点击，均未实现。
-3. **模型配置下发**：`TestRunPreparation` 与 `test-executor.ts` 传递 `modelBaseUrl/modelName/modelApiKey`，但 `NodeTestJob`、`/desired` 的 tests 载荷与 runner payload 都没有这些字段，视觉定位所需配置到不了节点。
+3. ~~**模型配置下发**~~：已修复，见「部分实现」。
 4. **测试报告**：Midscene HTML 报告、截图、步骤证据未产出也未留在测试区。
 5. **单步超时**：规格要求定位超时失败并记录已尝试的定位方式；当前只有 fetch 超时与容器 exec 硬超时。
 6. **手工录制**：手工操作录制成可回放黑盒记录未实现；门户也无用户案例编辑界面。
@@ -57,7 +58,7 @@ P0.5 的目标是「真实测试执行器」。为确定剩余工作量，对控
 
 ## 下一步建议（按投入与收益排序）
 
-1. **模型配置下发**（小）：把 `modelBaseUrl/modelName/modelApiKey` 加入 `NodeTestJob`、job 表与 runner payload，为视觉定位打通前提；同时可让黑盒失败原因更具体。
+1. ~~**模型配置下发**（小）~~：已完成。
 2. **调度可观测性**（中）：`test_jobs` 增加 attempt/log，节点回报实时日志片段；先解决排障困难，再谈优先级与重试队列。
 3. **黑盒第一版**（大）：确认候选镜像内可执行 Playwright/Chrome 后在 runner 实现 `open/fill/click/advance` 与三级定位；需同步改造镜像模板、依赖与模型配置下发，并补 HTML 报告落盘。
 4. **门户案例编辑与发布禁用**（中）：补用户案例编辑 UI，并在未通过测试时禁用发布按钮（后端 409 已就绪）。
@@ -65,7 +66,7 @@ P0.5 的目标是「真实测试执行器」。为确定剩余工作量，对控
 ## 验证记录
 
 - `pnpm exec tsc --noEmit -p tsconfig.json`：通过。
-- 控制面新增/扩充用例：`online-testing.test.ts` 5/5 通过（含自动案例 target 格式断言与异步回放元数据用例）。
+- 控制面新增/扩充用例：`online-testing.test.ts` 6/6 通过（含自动案例 target 格式断言、异步回放元数据、模型配置下发）；`node-agent.test.mjs` 12/12 通过（含 runner payload 模型配置断言）。
 - 控制面全套测试在局域网容器内以 `platform_test` 执行：32 个文件、87 个用例全部通过。
 - 测试前重建独立库，不触碰正式库 `platform`。
 
@@ -73,6 +74,8 @@ P0.5 的目标是「真实测试执行器」。为确定剩余工作量，对控
 
 - `platform/apps/control-plane/src/test-cases.ts`
 - `platform/apps/control-plane/src/node-tests.ts`
+- `platform/apps/control-plane/src/node-agent-template.mjs`
 - `platform/apps/control-plane/src/schema.sql`
 - `platform/apps/control-plane/test/online-testing.test.ts`
+- `platform/apps/control-plane/test/node-agent.test.mjs`
 - 本文档：`docs/superpowers/plans/2026-11-20-test-executor-gaps.md`

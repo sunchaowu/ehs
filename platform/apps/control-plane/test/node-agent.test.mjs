@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -165,6 +165,47 @@ describe("test node agent", () => {
     expect(reports[0].path).toBe("/api/nodes/test-1/tests/job-01");
     expect(reports[0].body.outcomes[0].passed).toBe(true);
     expect(calls.filter((args) => args[0] === "rm" && args[1] === "-f").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("writes the model config into the test payload for the black-box runner", async () => {
+    process.env.PLATFORM_NODE_NAME = "test-1";
+    process.env.PLATFORM_DATABASE_URL_TEMPLATE = "postgres://platform:pw@db:5432/{database}";
+    const directory = await tempDirectory();
+    await writeFile(join(directory, "test-runner.mjs"), "// runner", "utf8");
+    let payload;
+    const docker = async (args) => {
+      if (args[0] === "cp" && args[2].endsWith(":/tmp/platform-test-payload.json")) {
+        payload = JSON.parse(await readFile(args[1], "utf8"));
+      }
+      if (args[0] === "exec" && args[2] === "node" && args[3] === "-e") {
+        return { code: 0, stdout: JSON.stringify({ storage: "postgres" }), stderr: "" };
+      }
+      if (args[0] === "exec" && args[1] === "-e") {
+        return { code: 0, stdout: JSON.stringify({ outcomes: [] }), stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    await runTestJob(
+      {
+        id: "job-model",
+        runId: "run-1",
+        projectCode: "qing-jia",
+        imageDigest: "registry.internal:5000/qing-jia:latest",
+        databaseName: "tst_qing_jia",
+        cases: [],
+        stepTimeoutSeconds: 10,
+        runTimeoutSeconds: 600,
+        modelBaseUrl: "http://vllm.internal:8000/v1",
+        modelName: "qwen2.5-vl",
+        modelApiKey: "secret-key-for-test",
+      },
+      { docker, request: async () => ({ accepted: true }), nodeDir: directory },
+    );
+    expect(payload).toMatchObject({
+      modelBaseUrl: "http://vllm.internal:8000/v1",
+      modelName: "qwen2.5-vl",
+      modelApiKey: "secret-key-for-test",
+    });
   });
 
   it("reports a failed pull without starting a container", async () => {
