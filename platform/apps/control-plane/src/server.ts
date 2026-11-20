@@ -6,7 +6,7 @@ import { openDatabase, type SystemDatabase } from "./database.js";
 import { forwardBody, forwardHeaders } from "./entry-proxy.js";
 import { dockerImageBuilder, type ImageBuildInput } from "./images.js";
 import { opensslCertificateIssuer, type NodeCertificate } from "./node-install.js";
-import { assignNodePool, poolsOverlap, prepareNodeInstall, registerNode } from "./nodes.js";
+import { assignNodePool, listNodes, poolsOverlap, prepareNodeInstall, registerNode, removeNode, rotateNodeToken } from "./nodes.js";
 import { type TestExecutor } from "./test-executor.js";
 import { createModelClient, type ModelClient } from "./llm.js";
 import { readTestOverview, readTestRunSteps, replayTestRun, runProjectTests } from "./test-runs.js";
@@ -844,6 +844,22 @@ export async function buildServer(options?: {
     }
   });
 
+  app.get("/api/nodes", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor?.platformAdmin) {
+        return reply.code(actor ? 403 : 401).send({ reason: actor ? "需要平台管理员" : "未登录" });
+      }
+      return { nodes: await listNodes(database) };
+    } finally {
+      await database.close();
+    }
+  });
+
   app.post("/api/nodes", async (request, reply) => {
     const database = await requireDatabase(databaseUrl, reply);
     if (!database) {
@@ -860,6 +876,46 @@ export async function buildServer(options?: {
         return reply.code(result.status).send({ reason: result.reason });
       }
       return reply.code(201).send(result);
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.delete("/api/nodes/:name", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor?.platformAdmin) {
+        return reply.code(actor ? 403 : 401).send({ reason: actor ? "需要平台管理员" : "未登录" });
+      }
+      const result = await removeNode(database, (request.params as { name: string }).name);
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return reply.code(204).send();
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.post("/api/nodes/:name/rotate-token", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor?.platformAdmin) {
+        return reply.code(actor ? 403 : 401).send({ reason: actor ? "需要平台管理员" : "未登录" });
+      }
+      const result = await rotateNodeToken(database, (request.params as { name: string }).name);
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return result;
     } finally {
       await database.close();
     }

@@ -1,5 +1,5 @@
-import { HomeOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SettingOutlined, AppstoreOutlined, CloudOutlined, TeamOutlined, SafetyCertificateOutlined } from "@ant-design/icons";
-import { Alert, Avatar, Button, Card, Checkbox, ConfigProvider, Drawer, Dropdown, Empty, Form, Input, InputNumber, Layout, List, Menu, Space, Spin, Switch, Tag, Typography } from "antd";
+import { HomeOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SettingOutlined, AppstoreOutlined, CloudOutlined, TeamOutlined, SafetyCertificateOutlined, ClusterOutlined } from "@ant-design/icons";
+import { Alert, Avatar, Button, Card, Checkbox, ConfigProvider, Drawer, Dropdown, Empty, Form, Input, InputNumber, Layout, List, Menu, Select, Space, Spin, Switch, Tag, Typography } from "antd";
 import enUS from "antd/locale/en_US";
 import zhCN from "antd/locale/zh_CN";
 import { useEffect, useRef, useState } from "react";
@@ -43,7 +43,7 @@ export type SystemConfigView = {
   modelKeyConfigured: boolean;
 };
 
-type Section = "system" | "plugin" | "model" | "users" | "account";
+type Section = "system" | "plugin" | "model" | "users" | "nodes" | "account";
 
 type ProjectSummary = { name: string; code: string; containerGroup: string; projectAdmin: boolean };
 
@@ -62,6 +62,14 @@ type ProjectAccessView = {
   menus: DraftMenuView[];
   roles: Array<{ name: string; members: string[] }>;
   grants: DraftGrantView[];
+};
+type ManagedNodeView = {
+  name: string;
+  zone: string;
+  pool: string;
+  reportedAt: string | null;
+  projectCount: number;
+  gateway: string;
 };
 type SolutionChangeView = {
   added: { menus: DraftMenuView[]; grants: DraftGrantView[] };
@@ -265,6 +273,7 @@ function Workbench(props: {
           { key: "plugin", icon: <AppstoreOutlined />, label: <span data-testid="platform/shell/nav-plugin-config">{copy.plugin}</span> },
           { key: "model", icon: <CloudOutlined />, label: <span data-testid="platform/shell/nav-model-config">{copy.model}</span> },
           { key: "users", icon: <TeamOutlined />, label: <span data-testid="platform/shell/nav-users">{copy.users}</span> },
+          { key: "nodes", icon: <ClusterOutlined />, label: <span data-testid="platform/shell/nav-nodes">{copy.nodes}</span> },
         ]
       : []),
   ];
@@ -280,7 +289,7 @@ function Workbench(props: {
     />
   );
   const editingTitle =
-    section === "system" ? copy.system : section === "plugin" ? copy.plugin : section === "model" ? copy.model : section === "users" ? copy.users : section === "account" ? copy.personal : project ? project.name : creating ? copy.projectName : copy.home;
+    section === "system" ? copy.system : section === "plugin" ? copy.plugin : section === "model" ? copy.model : section === "users" ? copy.users : section === "nodes" ? copy.nodes : section === "account" ? copy.personal : project ? project.name : creating ? copy.projectName : copy.home;
   const languageChoices = props.languages.includes(props.session.language) ? props.languages : [props.session.language, ...props.languages];
   return (
     <Layout data-testid="platform/shell/root" className="platform-shell">
@@ -384,6 +393,7 @@ function Workbench(props: {
           {section === "plugin" && props.session.platformAdmin ? <PluginPage plugins={props.plugins} /> : null}
           {section === "model" && props.session.platformAdmin ? <ModelPage config={props.config} /> : null}
           {section === "users" && props.session.platformAdmin ? <UserManagementPage /> : null}
+          {section === "nodes" && props.session.platformAdmin ? <NodeManagementPage /> : null}
           {section === "account" ? <AccountPage session={props.session} /> : null}
           {section === null && project ? (
             <ProjectPage project={project} modelConfigured={props.modelConfigured} modelNotice={copy.modelUnavailable} />
@@ -1189,6 +1199,179 @@ function AccessManagementPage(props: { project: { name: string; code: string }; 
   );
 }
 
+function NodeManagementPage() {
+  const [nodes, setNodes] = useState<ManagedNodeView[]>([]);
+  const [loadError, setLoadError] = useState("");
+  const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [busy, setBusy] = useState("");
+  const [newToken, setNewToken] = useState<{ name: string; token: string } | null>(null);
+  const [form] = Form.useForm();
+  const load = () => {
+    void fetch("/api/nodes")
+      .then(async (response) => {
+        const body = (await response.json()) as { nodes?: ManagedNodeView[]; reason?: string };
+        if (!response.ok) {
+          setLoadError(body.reason ?? "节点列表读取失败");
+          return;
+        }
+        setNodes(body.nodes ?? []);
+      })
+      .catch(() => setLoadError("节点列表读取失败"));
+  };
+  useEffect(load, []);
+  const mutate = async (url: string, method: "POST" | "DELETE" | "PUT", body: unknown, success: string) => {
+    setFeedback(null);
+    const response = await fetch(url, {
+      method,
+      headers: { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const payload = (await response.json().catch(() => ({}))) as { reason?: string; token?: string; name?: string };
+    if (!response.ok) {
+      setFeedback({ type: "error", message: payload.reason ?? `${success}失败` });
+      return null;
+    }
+    setFeedback({ type: "success", message: success });
+    load();
+    return payload;
+  };
+  const poolLabel = (pool: string) => (pool === "prod" ? "正式池" : pool === "test" ? "测试池" : "未入池");
+  return (
+    <Card
+      data-testid="platform/nodes/page"
+      title="节点管理"
+      extra={<Typography.Text type="secondary">共 {nodes.length} 个节点</Typography.Text>}
+    >
+      <Typography.Paragraph>
+        登记节点后使用安装脚本接入；接入的节点不会自动入池，需按区域加入正式池或测试池。令牌与脚本只在生成时显示一次。
+      </Typography.Paragraph>
+      {loadError ? <Alert type="error" showIcon message={loadError} style={{ marginBottom: 16 }} /> : null}
+      {feedback ? (
+        <Alert data-testid="platform/nodes/feedback" type={feedback.type} showIcon message={feedback.message} style={{ marginBottom: 16 }} />
+      ) : null}
+      {newToken ? (
+        <Alert
+          data-testid="platform/nodes/token"
+          type="info"
+          showIcon
+          message={`${newToken.name} 的注册令牌（仅显示一次）`}
+          description={<Typography.Text code copyable>{newToken.token}</Typography.Text>}
+          style={{ marginBottom: 16 }}
+        />
+      ) : null}
+      <Form
+        form={form}
+        layout="inline"
+        style={{ marginBottom: 16 }}
+        initialValues={{ name: "", zone: "测试区" }}
+        onFinish={async (values: { name: string; zone: string }) => {
+          setFeedback(null);
+          const response = await fetch("/api/nodes", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(values),
+          });
+          const body = (await response.json().catch(() => ({}))) as { node?: { name: string }; token?: string; reason?: string };
+          if (!response.ok || !body.token) {
+            setFeedback({ type: "error", message: body.reason ?? "节点登记失败" });
+            return;
+          }
+          setNewToken({ name: values.name, token: body.token });
+          setFeedback({ type: "success", message: `${values.name} 已登记` });
+          form.resetFields();
+          load();
+        }}
+      >
+        <Form.Item name="name" label="节点名称" rules={[{ required: true, whitespace: true, pattern: /^[a-z0-9][a-z0-9-]{0,62}$/, message: "小写字母/数字/连字符，最长 63 位" }]}>
+          <Input data-testid="platform/nodes/name" />
+        </Form.Item>
+        <Form.Item name="zone" label="区域" rules={[{ required: true, message: "请选择区域" }]}>
+          <Select
+            data-testid="platform/nodes/zone"
+            style={{ width: 140 }}
+            options={["系统运行区", "测试区", "正式区"].map((value) => ({ value, label: value }))}
+          />
+        </Form.Item>
+        <Button htmlType="submit" type="primary" data-testid="platform/nodes/create">登记节点</Button>
+      </Form>
+      {nodes.map((node) => (
+        <List.Item key={node.name} data-testid={`platform/nodes/row-${node.name}`} style={{ borderBottom: "1px solid #f0f0f0", paddingBlock: 12 }}>
+          <List.Item.Meta
+            title={
+              <Space wrap size={8}>
+                <strong>{node.name}</strong>
+                <Tag data-testid={`platform/nodes/zone-${node.name}`}>{node.zone}</Tag>
+                <Tag color={node.pool === "prod" ? "blue" : node.pool === "test" ? "green" : undefined} data-testid={`platform/nodes/pool-${node.name}`}>
+                  {poolLabel(node.pool)}
+                </Tag>
+              </Space>
+            }
+            description={
+              <span data-testid={`platform/nodes/health-${node.name}`}>
+                {node.reportedAt
+                  ? `最近心跳 ${new Date(node.reportedAt).toLocaleString()} · ${node.projectCount} 个项目${node.gateway ? ` · ${node.gateway}` : ""}`
+                  : "尚未上报心跳"}
+              </span>
+            }
+          />
+          <Space wrap size={8}>
+            <a data-testid={`platform/nodes/install-${node.name}`} href={`/api/nodes/${encodeURIComponent(node.name)}/install`} target="_blank" rel="noreferrer">
+              安装脚本
+            </a>
+            <Button
+              size="small"
+              loading={busy === node.name}
+              data-testid={`platform/nodes/rotate-${node.name}`}
+              onClick={async () => {
+                setBusy(node.name);
+                const result = await mutate(`/api/nodes/${encodeURIComponent(node.name)}/rotate-token`, "POST", undefined, `${node.name} 令牌已轮换`);
+                setBusy("");
+                if (result?.token) {
+                  setNewToken({ name: node.name, token: result.token });
+                }
+              }}
+            >
+              轮换令牌
+            </Button>
+            {node.zone === "正式区" ? (
+              <Button
+                size="small"
+                data-testid={`platform/nodes/pool-prod-${node.name}`}
+                onClick={() =>
+                  void mutate(`/api/nodes/${encodeURIComponent(node.name)}/pool`, "PUT", { pool: node.pool === "prod" ? "" : "prod" }, node.pool === "prod" ? `${node.name} 已移出正式池` : `${node.name} 已加入正式池`)
+                }
+              >
+                {node.pool === "prod" ? "移出正式池" : "加入正式池"}
+              </Button>
+            ) : null}
+            {node.zone === "测试区" ? (
+              <Button
+                size="small"
+                data-testid={`platform/nodes/pool-test-${node.name}`}
+                onClick={() =>
+                  void mutate(`/api/nodes/${encodeURIComponent(node.name)}/pool`, "PUT", { pool: node.pool === "test" ? "" : "test" }, node.pool === "test" ? `${node.name} 已移出测试池` : `${node.name} 已加入测试池`)
+                }
+              >
+                {node.pool === "test" ? "移出测试池" : "加入测试池"}
+              </Button>
+            ) : null}
+            <Button
+              size="small"
+              danger
+              data-testid={`platform/nodes/remove-${node.name}`}
+              onClick={() =>
+                void mutate(`/api/nodes/${encodeURIComponent(node.name)}`, "DELETE", undefined, `${node.name} 已删除`)
+              }
+            >
+              删除
+            </Button>
+          </Space>
+        </List.Item>
+      ))}
+    </Card>
+  );
+}
+
 function LoginPage(props: {
   wechatAvailable: boolean;
   reason: string;
@@ -1351,8 +1534,13 @@ function CreateProjectPage(props: { onCreated: (project: { name: string; code: s
       <Form.Item name="name" label="项目名称">
         <Input data-testid="platform/project/name" />
       </Form.Item>
-      <Form.Item name="code" label="项目编码">
-        <Input data-testid="platform/project/code" />
+      <Form.Item
+        name="code"
+        label="项目编码"
+        rules={[{ pattern: /^[a-z][a-z0-9-]{0,62}$/, message: "以小写字母开头，仅含小写字母、数字与连字符，最长 63 位" }]}
+        extra={<span data-testid="platform/project/code-hint">{"留空则根据项目名称自动生成；格式 ^[a-z][a-z0-9-]{0,62}$"}</span>}
+      >
+        <Input data-testid="platform/project/code" placeholder="例如 qing-jia-shen-pi" />
       </Form.Item>
       {reason ? <Alert type="error" showIcon message={reason} style={{ marginBottom: 16 }} /> : null}
       <Button htmlType="submit" type="primary" data-testid="platform/project/save">

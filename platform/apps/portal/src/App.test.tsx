@@ -558,6 +558,8 @@ describe("portal shell", () => {
     );
     render(<App session={admin} title="企业应用平台" />);
     fireEvent.click(screen.getByTestId("platform/project/new"));
+    expect(screen.getByTestId("platform/project/code-hint")).toHaveTextContent("^[a-z][a-z0-9-]{0,62}$");
+    expect(screen.getByTestId("platform/project/code")).toHaveAttribute("placeholder", "例如 qing-jia-shen-pi");
     fireEvent.change(screen.getByTestId("platform/project/name"), { target: { value: "请假审批" } });
     fireEvent.click(screen.getByTestId("platform/project/save"));
     fireEvent.click(await screen.findByTestId("platform/project/access"));
@@ -584,6 +586,67 @@ describe("portal shell", () => {
     });
     fireEvent.click(screen.getByTestId("platform/access/back"));
     expect(await screen.findByTestId("platform/project/draft")).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+
+  it("lists nodes and lets an administrator register, pool, rotate and remove nodes", async () => {
+    const requests: Array<{ url: string; method?: string; body?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
+        const target = String(url);
+        requests.push({ url: target, method: init?.method, body: init?.body });
+        if (target === "/api/nodes" && !init?.method) {
+          return {
+            ok: true,
+            json: async () => ({
+              nodes: [
+                { name: "prod-1", zone: "正式区", pool: "prod", reportedAt: "2026-11-20T06:00:00.000Z", projectCount: 2, gateway: "http://172.18.0.9:8081" },
+                { name: "test-1", zone: "测试区", pool: "test", reportedAt: null, projectCount: 0, gateway: "" },
+              ],
+            }),
+          };
+        }
+        if (target === "/api/nodes" && init?.method === "POST") {
+          return { ok: true, json: async () => ({ node: { name: "test-2", zone: "测试区", pool: "" }, token: "new-token" }) };
+        }
+        if (target.endsWith("/rotate-token")) {
+          return { ok: true, json: async () => ({ name: "test-1", token: "rotated-token" }) };
+        }
+        return { ok: true, json: async () => ({}) };
+      }),
+    );
+    render(<App session={admin} title="企业应用平台" />);
+    expect(screen.getByTestId("platform/shell/nav-nodes")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("platform/shell/nav-nodes"));
+    expect(await screen.findByTestId("platform/nodes/page")).toHaveTextContent("共 2 个节点");
+    expect(screen.getByTestId("platform/nodes/pool-prod-1")).toHaveTextContent("正式池");
+    expect(screen.getByTestId("platform/nodes/health-prod-1")).toHaveTextContent("2 个项目");
+    expect(screen.getByTestId("platform/nodes/zone-test-1")).toHaveTextContent("测试区");
+    expect(screen.getByTestId("platform/nodes/health-test-1")).toHaveTextContent("尚未上报心跳");
+    expect(screen.getByTestId("platform/nodes/install-test-1")).toHaveAttribute("href", "/api/nodes/test-1/install");
+
+    fireEvent.change(screen.getByTestId("platform/nodes/name"), { target: { value: "test-2" } });
+    fireEvent.click(screen.getByTestId("platform/nodes/create"));
+    expect(await screen.findByTestId("platform/nodes/token")).toHaveTextContent("new-token");
+    await vi.waitFor(() => {
+      expect(
+        requests.some((item) => item.url === "/api/nodes" && item.method === "POST" && item.body === '{"name":"test-2","zone":"测试区"}'),
+      ).toBe(true);
+    });
+
+    fireEvent.click(screen.getByTestId("platform/nodes/pool-test-test-1"));
+    await vi.waitFor(() => {
+      expect(requests.some((item) => item.url === "/api/nodes/test-1/pool" && item.method === "PUT" && item.body === '{"pool":""}')).toBe(true);
+    });
+
+    fireEvent.click(screen.getByTestId("platform/nodes/rotate-test-1"));
+    expect(await screen.findByTestId("platform/nodes/token")).toHaveTextContent("rotated-token");
+
+    fireEvent.click(screen.getByTestId("platform/nodes/remove-test-1"));
+    await vi.waitFor(() => {
+      expect(requests.some((item) => item.url === "/api/nodes/test-1" && item.method === "DELETE")).toBe(true);
+    });
     vi.unstubAllGlobals();
   });
 

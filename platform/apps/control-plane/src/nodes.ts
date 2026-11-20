@@ -121,6 +121,80 @@ export async function prepareNodeInstall(
   };
 }
 
+export type ManagedNode = {
+  name: string;
+  zone: string;
+  pool: string;
+  reportedAt: string | null;
+  projectCount: number;
+  gateway: string;
+};
+
+/** 平台管理员的节点列表：分区、节点池与最近一次心跳，不返回任何令牌哈希。 */
+export async function listNodes(database: SystemDatabase): Promise<ManagedNode[]> {
+  const config = await database.readConfig();
+  const prod = new Set(poolNames(config["scheduler.defaultNodePool"]));
+  const test = new Set(poolNames(config["test.nodePool"]));
+  const found = await database.query<{
+    name: string;
+    zone: string;
+    reported_at: Date | string | null;
+    projects: unknown;
+    gateway: string | null;
+  }>(
+    `select nodes.name, nodes.zone, node_reports.reported_at, node_reports.projects, node_reports.gateway
+     from nodes left join node_reports on node_reports.node_name = nodes.name
+     order by nodes.name`,
+  );
+  return found.rows.map((row) => ({
+    name: row.name,
+    zone: row.zone,
+    pool: prod.has(row.name) ? "prod" : test.has(row.name) ? "test" : "",
+    reportedAt: row.reported_at ? new Date(row.reported_at).toISOString() : null,
+    projectCount: Array.isArray(row.projects) ? row.projects.length : 0,
+    gateway: row.gateway ?? "",
+  }));
+}
+
+/** 删除节点：清理两个节点池与期望状态中的目标节点；心跳、任务由外键级联删除。 */
+export async function removeNode(database: SystemDatabase, name: string): Promise<{ removed: true } | { reason: string; status: number }> {
+  const found = await database.query("select 1 from nodes where name = $1", [name]);
+  if (found.rows.length === 0) {
+    return { reason: "节点不存在", status: 404 };
+  }
+  const config = await database.readConfig();
+  const next: SystemConfig = {
+    ...config,
+    "scheduler.defaultNodePool": poolNames(config["scheduler.defaultNodePool"]).filter((item) => item !== name).join(","),
+    "test.nodePool": poolNames(config["test.nodePool"]).filter((item) => item !== name).join(","),
+  };
+  await database.saveConfig(next);
+  await database.query(
+    `update desired_states
+     set target_nodes = array_to_string(array_remove(string_to_array(target_nodes, ','), $1), ',')
+     where $1 = any(string_to_array(target_nodes, ','))`,
+    [name],
+  );
+  await database.query("delete from nodes where name = $1", [name]);
+  return { removed: true };
+}
+
+/** 轮换节点注册令牌；旧令牌立即失效，明文只返回一次。 */
+export async function rotateNodeToken(
+  database: SystemDatabase,
+  name: string,
+): Promise<{ name: string; token: string } | { reason: string; status: number }> {
+  const token = randomBytes(32).toString("base64url");
+  const updated = await database.query("update nodes set token_hash = $2 where name = $1", [
+    name,
+    createHash("sha256").update(token).digest("hex"),
+  ]);
+  if ((updated.rowCount ?? 0) === 0) {
+    return { reason: "节点不存在", status: 404 };
+  }
+  return { name, token };
+}
+
 function isUniqueViolation(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "23505";
 }
