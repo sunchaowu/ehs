@@ -33,6 +33,8 @@ type StoredJobRow = {
   step_timeout_seconds: number;
   run_timeout_seconds: number;
   status: string;
+  replayed_from: string | null;
+  replayed_from_digest: string | null;
 };
 
 export type NodeTestDispatch =
@@ -87,8 +89,8 @@ async function enqueueNodeJob(
   }
   await database.query(
     `insert into test_jobs
-     (id, run_id, node_name, project_code, image_digest, database_name, cases, step_timeout_seconds, run_timeout_seconds, status, created_at)
-     values (gen_random_uuid(), $1, $2, $3, $4, $5, $6::jsonb, $7, $8, 'pending', now())`,
+     (id, run_id, node_name, project_code, image_digest, database_name, cases, step_timeout_seconds, run_timeout_seconds, replayed_from, replayed_from_digest, status, created_at)
+     values (gen_random_uuid(), $1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, 'pending', now())`,
     [
       prepared.runId,
       node,
@@ -98,6 +100,8 @@ async function enqueueNodeJob(
       JSON.stringify(prepared.cases),
       prepared.stepTimeoutSeconds,
       prepared.runTimeoutSeconds,
+      prepared.replayedFrom,
+      prepared.replayedFromDigest,
     ],
   );
   return { runId: prepared.runId, status: "running", node };
@@ -173,8 +177,8 @@ export async function acceptTestJobReport(
     database,
     prepared,
     { steps: outcomes },
-    null,
-    null,
+    job.replayed_from,
+    job.replayed_from_digest,
   );
   return { accepted: true };
 }

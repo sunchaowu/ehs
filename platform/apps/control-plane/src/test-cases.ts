@@ -149,7 +149,7 @@ export function generateAutomaticCases(projectCode: string, design: DesignDocume
       steps: workflow.steps.map((step, position) => ({
         index: position + 1,
         action: "migrate",
-        target: `${projectCode}/${workflow.name}/${step}`,
+        target: `${projectCode}/workflows/${workflow.name}/${step}`,
         expected: "迁移成功",
       })),
     });

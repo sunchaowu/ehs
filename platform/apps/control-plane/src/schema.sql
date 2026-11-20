@@ -264,6 +264,9 @@ create table if not exists test_jobs (
   created_at timestamptz not null
 );
 
+alter table test_jobs add column if not exists replayed_from uuid references test_runs (id) on delete set null;
+alter table test_jobs add column if not exists replayed_from_digest text;
+
 create table if not exists portal_notifications (
   id uuid primary key,
   user_id uuid not null references users (id) on delete cascade,
