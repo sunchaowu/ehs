@@ -20,6 +20,9 @@ export type NodeTestJob = {
   cases: StoredTestCase[];
   stepTimeoutSeconds: number;
   runTimeoutSeconds: number;
+  modelBaseUrl: string;
+  modelName: string;
+  modelApiKey: string;
 };
 
 type StoredJobRow = {
@@ -35,6 +38,9 @@ type StoredJobRow = {
   status: string;
   replayed_from: string | null;
   replayed_from_digest: string | null;
+  model_base_url: string;
+  model_name: string;
+  model_api_key: string;
 };
 
 export type NodeTestDispatch =
@@ -89,8 +95,8 @@ async function enqueueNodeJob(
   }
   await database.query(
     `insert into test_jobs
-     (id, run_id, node_name, project_code, image_digest, database_name, cases, step_timeout_seconds, run_timeout_seconds, replayed_from, replayed_from_digest, status, created_at)
-     values (gen_random_uuid(), $1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, 'pending', now())`,
+     (id, run_id, node_name, project_code, image_digest, database_name, cases, step_timeout_seconds, run_timeout_seconds, replayed_from, replayed_from_digest, model_base_url, model_name, model_api_key, status, created_at)
+     values (gen_random_uuid(), $1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, 'pending', now())`,
     [
       prepared.runId,
       node,
@@ -102,6 +108,9 @@ async function enqueueNodeJob(
       prepared.runTimeoutSeconds,
       prepared.replayedFrom,
       prepared.replayedFromDigest,
+      prepared.modelBaseUrl,
+      prepared.modelName,
+      prepared.modelApiKey,
     ],
   );
   return { runId: prepared.runId, status: "running", node };
@@ -124,7 +133,7 @@ export async function claimTestJobs(database: SystemDatabase, nodeName: string, 
        for update skip locked
      )
      returning id, run_id, node_name, project_code, image_digest, database_name, cases,
-               step_timeout_seconds, run_timeout_seconds, status`,
+               step_timeout_seconds, run_timeout_seconds, status, model_base_url, model_name, model_api_key`,
     [nodeName, limit],
   );
   return claimed.rows.map((row) => ({
@@ -136,6 +145,9 @@ export async function claimTestJobs(database: SystemDatabase, nodeName: string, 
     cases: row.cases,
     stepTimeoutSeconds: row.step_timeout_seconds,
     runTimeoutSeconds: row.run_timeout_seconds,
+    modelBaseUrl: row.model_base_url,
+    modelName: row.model_name,
+    modelApiKey: row.model_api_key,
   }));
 }
 

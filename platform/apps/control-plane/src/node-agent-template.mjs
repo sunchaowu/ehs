@@ -355,7 +355,14 @@ export async function runTestJob(job, options = {}) {
     }
     writeFileSync(
       payloadPath,
-      JSON.stringify({ cases: job.cases ?? [], stepTimeoutSeconds: job.stepTimeoutSeconds }),
+      JSON.stringify({
+        cases: job.cases ?? [],
+        stepTimeoutSeconds: job.stepTimeoutSeconds,
+        runTimeoutSeconds: job.runTimeoutSeconds,
+        modelBaseUrl: job.modelBaseUrl ?? "",
+        modelName: job.modelName ?? "",
+        modelApiKey: job.modelApiKey ?? "",
+      }),
       "utf8",
     );
     const copiedRunner = await dockerFn(["cp", runnerPath, containerName + ":/tmp/platform-test-runner.mjs"]);

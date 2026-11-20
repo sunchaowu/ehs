@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -109,6 +109,28 @@ describe("white-box test runner", () => {
     expect(outcomes[2].passed).toBe(false);
     expect(outcomes[2].reason).toContain("不受支持");
   });
+
+  it("makes the black-box failure reason reflect whether the model config arrived", async () => {
+    const cases = [{
+      code: "case-bb",
+      name: "界面",
+      method: "black-box",
+      steps: [{ index: 1, action: "click", target: "a/b/submit", expected: "保存成功" }],
+    }];
+    const withoutModel = await runWhiteBoxCases(cases, {});
+    expect(withoutModel[0].passed).toBe(false);
+    expect(withoutModel[0].reason).toContain("黑盒执行器未配置");
+    expect(withoutModel[0].reason).toContain("视觉定位模型未下发");
+
+    const withModel = await runWhiteBoxCases(cases, {
+      modelBaseUrl: "http://model.internal/v1",
+      modelName: "doubao-vision",
+      modelApiKey: "sk-test-key",
+    });
+    expect(withModel[0].passed).toBe(false);
+    expect(withModel[0].reason).toContain("黑盒执行器未配置");
+    expect(withModel[0].reason).toContain("模型已就绪");
+  });
 });
 
 describe("test node agent", () => {
@@ -126,8 +148,12 @@ describe("test node agent", () => {
     await writeFile(join(directory, "test-runner.mjs"), "// runner", "utf8");
     const calls = [];
     const reports = [];
+    let runnerPayload;
     const docker = async (args) => {
       calls.push(args);
+      if (args[0] === "cp" && typeof args[1] === "string" && args[1].includes("test-payload-")) {
+        runnerPayload = JSON.parse(await readFile(args[1], "utf8"));
+      }
       if (args[0] === "exec" && args[1] === "platform-test-job01" && args[2] === "node") {
         return { code: 0, stdout: JSON.stringify({ storage: "postgres" }), stderr: "" };
       }
@@ -154,6 +180,9 @@ describe("test node agent", () => {
         cases: [],
         stepTimeoutSeconds: 10,
         runTimeoutSeconds: 600,
+        modelBaseUrl: "http://model.internal/v1",
+        modelName: "doubao-vision",
+        modelApiKey: "sk-test-key",
       },
       { docker, request, nodeDir: directory },
     );
@@ -162,6 +191,13 @@ describe("test node agent", () => {
     expect(run).toContain("DATABASE_URL=postgres://platform:pw@db:5432/tst_qing_jia");
     expect(calls.some((args) => args[0] === "cp" && args[2].endsWith(":/tmp/platform-test-runner.mjs"))).toBe(true);
     expect(calls.some((args) => args[0] === "cp" && args[2].endsWith(":/tmp/platform-test-payload.json"))).toBe(true);
+    expect(runnerPayload).toMatchObject({
+      stepTimeoutSeconds: 10,
+      runTimeoutSeconds: 600,
+      modelBaseUrl: "http://model.internal/v1",
+      modelName: "doubao-vision",
+      modelApiKey: "sk-test-key",
+    });
     expect(reports[0].path).toBe("/api/nodes/test-1/tests/job-01");
     expect(reports[0].body.outcomes[0].passed).toBe(true);
     expect(calls.filter((args) => args[0] === "rm" && args[1] === "-f").length).toBeGreaterThanOrEqual(2);

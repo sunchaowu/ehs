@@ -112,6 +112,15 @@ export async function runWhiteBoxCases(cases, options) {
   const baseUrl = String(options.baseUrl ?? "http://127.0.0.1:8080").replace(/\/+$/, "");
   const timeoutMs = Math.max(1, Number(options.timeoutSeconds ?? 30)) * 1000;
   const fetchImpl = options.fetchImpl ?? fetch;
+  const model = {
+    baseUrl: typeof options.modelBaseUrl === "string" ? options.modelBaseUrl.trim() : "",
+    name: typeof options.modelName === "string" ? options.modelName.trim() : "",
+    apiKey: typeof options.modelApiKey === "string" ? options.modelApiKey.trim() : "",
+  };
+  // 黑盒步骤尚未接入执行器；若模型配置已下发，说明配置就绪、仅缺执行器，便于排障。
+  const blackBoxReason = model.baseUrl && model.name && model.apiKey
+    ? "黑盒执行器未配置：模型已就绪，Midscene.js 与 Playwright 待接入"
+    : "黑盒执行器未配置：Midscene.js 与 Playwright 待接入（视觉定位模型未下发）";
   const outcomes = [];
   for (const testCase of cases) {
     for (const step of testCase.steps ?? []) {
@@ -129,7 +138,7 @@ export async function runWhiteBoxCases(cases, options) {
           input: { action: step.action, target: step.target, ...(step.value !== undefined ? { value: step.value } : {}) },
           actual: "",
           passed: false,
-          reason: "黑盒执行器未配置：Midscene.js 与 Playwright 待接入",
+          reason: blackBoxReason,
         });
         continue;
       }
@@ -182,6 +191,9 @@ async function main() {
     const outcomes = await runWhiteBoxCases(payload.cases ?? [], {
       baseUrl: "http://127.0.0.1:8080",
       timeoutSeconds: payload.stepTimeoutSeconds ?? 30,
+      modelBaseUrl: payload.modelBaseUrl,
+      modelName: payload.modelName,
+      modelApiKey: payload.modelApiKey,
     });
     console.log(JSON.stringify({ outcomes }));
   } catch (error) {
