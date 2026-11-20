@@ -7,7 +7,11 @@
 
 import { spawn } from "node:child_process";
 import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { hostname, networkInterfaces } from "node:os";
 import { pathToFileURL } from "node:url";
+
+const accessPorts = new Map();
 
 const healthScript =
   "fetch('http://127.0.0.1:8080/health').then(function (r) { return r.json(); }).then(function (j) { console.log(JSON.stringify(j)); }).catch(function () { process.exit(1); })";
@@ -90,8 +94,7 @@ export function databaseUrl(databaseName) {
   return template.indexOf("{database}") === -1 ? template : template.split("{database}").join(databaseName);
 }
 
-export function containerHealth(name, dockerFn = docker, attempts = 20, intervalMs = 1500) {
-  let attempt = 0;
+export function containerHealth(name, dockerFn = docker, attempts = 20, intervalMs = 1500) {  let attempt = 0;
   function next() {
     return dockerFn(["exec", name, "node", "-e", healthScript]).then(function (result) {
       if (result.code === 0) {
@@ -113,8 +116,115 @@ export function containerHealth(name, dockerFn = docker, attempts = 20, interval
   return next();
 }
 
+export function parseDockerPort(output) {
+  const match = /:(\d+)\s*$/m.exec(String(output ?? "").trim());
+  return match ? Number(match[1]) : 0;
+}
+
+export function gatewayPort() {
+  return Number(process.env.PLATFORM_NODE_GATEWAY_PORT || 8081);
+}
+
+/**
+ * 上报给控制面的节点地址：优先环境变量，其次本机第一个非回环 IPv4，
+ * 最后才退回主机名（主机名只有在控制面能解析时才可用）。
+ */
+export function nodeAddress() {
+  if (process.env.PLATFORM_NODE_ADDRESS) {
+    return process.env.PLATFORM_NODE_ADDRESS;
+  }
+  const interfaces = networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    for (const item of interfaces[name] || []) {
+      if (item.family === "IPv4" && !item.internal) {
+        return item.address;
+      }
+    }
+  }
+  return hostname();
+}
+
+export function gatewayUrl() {
+  if (process.env.PLATFORM_NODE_GATEWAY_URL) {
+    return process.env.PLATFORM_NODE_GATEWAY_URL.replace(/\/+$/, "");
+  }
+  return `http://${nodeAddress()}:${gatewayPort()}`;
+}
+
+/**
+ * 入口网关：默认监听 0.0.0.0:<8081>，由节点所在网络的分区规则限制访问来源。
+ * 控制面已经在转发前校验登录、项目成员与已发布版本，并注入身份头。
+ */
+export function startGateway(options = {}) {
+  const port = options.port ?? gatewayPort();
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const server = createServer(function (request, response) {
+    void proxyToProject(request, response, fetchImpl);
+  });
+  return new Promise(function (resolve, reject) {
+    server.once("error", reject);
+    server.listen(port, "0.0.0.0", function () {
+      resolve(server);
+    });
+  });
+}
+
+export async function proxyToProject(request, response, fetchImpl = fetch, ports = accessPorts) {
+  const url = new URL(request.url || "/", "http://node.local");
+  const parts = url.pathname.split("/").filter(Boolean);
+  if (parts[0] !== "p" || !parts[1]) {
+    response.writeHead(404);
+    response.end("not found");
+    return;
+  }
+  const port = ports.get(decodeURIComponent(parts[1]));
+  if (!port) {
+    response.writeHead(404);
+    response.end("project container not found");
+    return;
+  }
+  const chunks = [];
+  for await (const chunk of request) {
+    chunks.push(chunk);
+  }
+  const headers = {};
+  for (const name of ["content-type", "accept", "accept-language"]) {
+    if (request.headers[name]) {
+      headers[name] = request.headers[name];
+    }
+  }
+  for (const name of ["x-platform-user", "x-platform-roles"]) {
+    if (request.headers[name]) {
+      headers[name] = request.headers[name];
+    }
+  }
+  const body = request.method === "GET" || request.method === "HEAD" ? undefined : Buffer.concat(chunks);
+  try {
+    const upstream = await fetchImpl(`http://127.0.0.1:${port}${url.pathname}${url.search}`, {
+      method: request.method,
+      headers: headers,
+      body: body,
+      redirect: "manual",
+    });
+    const buffer = Buffer.from(await upstream.arrayBuffer());
+    const outHeaders = {
+      "content-type": upstream.headers.get("content-type") || "application/octet-stream",
+    };
+    const location = upstream.headers.get("location");
+    if (location) {
+      outHeaders.location = location;
+    }
+    response.writeHead(upstream.status, outHeaders);
+    response.end(buffer);
+  } catch {
+    response.writeHead(502);
+    response.end("project container unreachable");
+  }
+}
+
 export async function reconcileProject(item, options = {}) {
   const dockerFn = options.docker ?? docker;
+  accessPorts.delete(item.code);
   const pulled = await dockerFn(["pull", item.imageDigest]);
   if (pulled.code !== 0) {
     return {
@@ -126,7 +236,18 @@ export async function reconcileProject(item, options = {}) {
     };
   }
   await dockerFn(["rm", "-f", "platform-" + item.code]);
-  const args = ["run", "-d", "--name", "platform-" + item.code, "-e", "DATABASE_NAME=" + item.databaseName, "-e", "runtime.mode=prod"];
+  const args = [
+    "run",
+    "-d",
+    "--name",
+    "platform-" + item.code,
+    "-p",
+    "127.0.0.1::8080",
+    "-e",
+    "DATABASE_NAME=" + item.databaseName,
+    "-e",
+    "runtime.mode=prod",
+  ];
   const url = databaseUrl(item.databaseName);
   if (url) {
     args.push("-e", "DATABASE_URL=" + url);
@@ -141,6 +262,14 @@ export async function reconcileProject(item, options = {}) {
       imageDigest: item.imageDigest,
       reason: (started.stderr || started.stdout || "容器启动失败").trim(),
     };
+  }
+  const published = await dockerFn(["port", "platform-" + item.code, "8080/tcp"]);
+  const accessPort = published.code === 0 ? parseDockerPort(published.stdout) : 0;
+  if (accessPort) {
+    accessPorts.set(item.code, accessPort);
+    if (options.onPort) {
+      options.onPort(item.code, accessPort);
+    }
   }
   const health = await containerHealth("platform-" + item.code, dockerFn);
   const connected = Boolean(health && health.storage === "postgres");
@@ -281,7 +410,7 @@ export async function cycle() {
   await request("/api/nodes/" + nodeName() + "/health", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ projects: projects }),
+    body: JSON.stringify({ projects: projects, gateway: gatewayUrl() }),
   });
 }
 
@@ -290,6 +419,11 @@ async function main() {
     const job = JSON.parse(Buffer.from(process.argv[3] || "", "base64").toString("utf8"));
     await runTestJob(job);
     return;
+  }
+  try {
+    await startGateway();
+  } catch {
+    // 网关端口被占用时不影响容器协调与测试任务，健康上报仍会带地址。
   }
   while (true) {
     try {

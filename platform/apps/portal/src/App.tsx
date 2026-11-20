@@ -1249,6 +1249,24 @@ function ProjectPage(props: { project: { name: string; code: string }; modelConf
   const [reason, setReason] = useState("");
   const [templateState, setTemplateState] = useState("");
   const [release, setRelease] = useState<ReleaseView | null>(null);
+  const [messages, setMessages] = useState<Array<{ role: string; body: string }>>([]);
+  const [sending, setSending] = useState(false);
+  const loadMessages = () => {
+    void fetch(`/api/projects/${props.project.code}/messages`)
+      .then(async (response) => {
+        if (!response.ok) {
+          return [];
+        }
+        const body = (await response.json()) as { messages?: Array<{ role?: string; body: string }> };
+        return (body.messages ?? []).map((item) => ({ role: item.role === "assistant" ? "assistant" : "user", body: item.body }));
+      })
+      .then(setMessages)
+      .catch(() => setMessages([]));
+  };
+  useEffect(() => {
+    loadMessages();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.project.code]);
   const waiting = (release?.nodes ?? []).filter((node) => !node.healthy).map((node) => `${node.name}：${node.reason ?? "尚未报告"}`);
   return (
     <div>
@@ -1291,6 +1309,14 @@ function ProjectPage(props: { project: { name: string; code: string }; modelConf
           >
             应用 OA 模板
           </Button>
+          <Button
+            data-testid="platform/project/open-entry"
+            href={`/p/${props.project.code}`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            打开项目
+          </Button>
           </Space>
           {templateState ? <Typography.Paragraph data-testid="platform/project/template-result" style={{ marginTop: 16 }}>{templateState}</Typography.Paragraph> : null}
           {release ? (
@@ -1316,23 +1342,56 @@ function ProjectPage(props: { project: { name: string; code: string }; modelConf
           ) : null}
         </Card>
         <Card data-testid="platform/project/session" className="platform-project-session" title="会话" style={{ width: 400 }}>
+          <List
+            data-testid="platform/project/message-list"
+            locale={{ emptyText: "尚无会话记录" }}
+            style={{ maxHeight: 320, overflowY: "auto", marginBottom: 12 }}
+            dataSource={messages}
+            renderItem={(item) => (
+              <List.Item
+                data-testid="platform/project/message-item"
+                style={{ display: "block", borderBottom: "none", paddingBlock: 4 }}
+              >
+                <Tag color={item.role === "assistant" ? "blue" : "default"}>{item.role === "assistant" ? "方案分析师" : "我"}</Tag>
+                <Typography.Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>{item.body}</Typography.Paragraph>
+              </List.Item>
+            )}
+          />
           <Form
             onFinish={async (values: { body: string }) => {
+              setSending(true);
+              setReason("");
               const response = await fetch(`/api/projects/${props.project.code}/messages`, {
                 method: "POST",
                 headers: { "content-type": "application/json" },
                 body: JSON.stringify({ body: values.body }),
               });
+              const body = (await response.json()) as { reason?: string };
+              setSending(false);
               if (!response.ok) {
-                const body = (await response.json()) as { reason?: string };
                 setReason(body.reason ?? "发送失败");
+                return;
               }
+              loadMessages();
             }}
           >
             <Form.Item name="body">
-              <Input data-testid="platform/project/message" disabled={!props.modelConfigured} />
+              <Input
+                data-testid="platform/project/message"
+                placeholder={props.modelConfigured ? "描述需要的菜单、数据、流程或授权" : props.modelNotice}
+                disabled={!props.modelConfigured || sending}
+              />
             </Form.Item>
             {reason ? <Alert type="error" showIcon message={reason} /> : null}
+            <Button
+              htmlType="submit"
+              type="primary"
+              data-testid="platform/project/send"
+              loading={sending}
+              disabled={!props.modelConfigured}
+            >
+              发送
+            </Button>
           </Form>
         </Card>
       </div>

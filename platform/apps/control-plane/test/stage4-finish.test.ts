@@ -32,7 +32,9 @@ describe("node install script", () => {
     expect(script).toContain('health.storage === "postgres"');
     expect(script).toContain("runtime.mode=test");
     expect(script).not.toContain("postgres://");
-    expect(script).not.toContain("0.0.0.0");
+    expect(script).toContain("127.0.0.1::8080");
+    expect(script).toContain("startGateway");
+    expect(script).toContain("PLATFORM_NODE_GATEWAY_PORT");
   });
 });
 

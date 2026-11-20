@@ -94,7 +94,6 @@ create table if not exists draft_menus (
   project_id uuid not null references projects (id) on delete cascade,
   code text not null,
   name text not null,
-  parent_code text,
   sort integer not null,
   unique (project_id, code)
 );
@@ -121,6 +120,8 @@ create table if not exists requirement_messages (
   body text not null,
   created_at timestamptz not null
 );
+
+alter table requirement_messages add column if not exists role text not null default 'user';
 
 create table if not exists draft_records (
   id uuid primary key,
@@ -171,6 +172,8 @@ create table if not exists node_reports (
   projects jsonb not null
 );
 
+alter table node_reports add column if not exists gateway text not null default '';
+
 create table if not exists desired_states (
   project_id uuid primary key references projects (id) on delete cascade,
   image_digest text not null,
@@ -182,6 +185,7 @@ create table if not exists published_menus (
   project_id uuid not null references projects (id) on delete cascade,
   code text not null,
   name text not null,
+  parent_code text,
   primary key (project_id, code)
 );
 

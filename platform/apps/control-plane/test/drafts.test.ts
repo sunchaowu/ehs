@@ -24,9 +24,12 @@ describe("drafts and requirement sessions", () => {
     await database.migrate();
     await database.query("delete from sessions");
     await database.query("delete from users");
+    const initialConfig = await database.readConfig();
+    await database.saveConfig({ ...initialConfig, "model.baseUrl": "", "model.name": "", "model.apiKey": "" });
     await database.close();
     const installed = await installInitialAdmin(databaseUrl!, input);
-    app = await buildServer({ databaseUrl });
+    const silentModel = async () => ({ message: { role: "assistant" as const, content: null } });
+    app = await buildServer({ databaseUrl, modelClient: silentModel });
     const registered = await app.inject({
       method: "POST",
       url: "/api/account/register",
@@ -114,8 +117,8 @@ describe("drafts and requirement sessions", () => {
       url: `/api/projects/${code}/messages`,
       cookies: { platform_session: employeeCookie },
     });
-    expect(adminMessages.json().messages).toEqual([{ body: "管理员的需求" }]);
-    expect(employeeMessages.json().messages).toEqual([{ body: "员工的需求" }]);
+    expect(adminMessages.json().messages).toEqual([{ role: "user", body: "管理员的需求" }]);
+    expect(employeeMessages.json().messages).toEqual([{ role: "user", body: "员工的需求" }]);
     await app.inject({
       method: "POST",
       url: `/api/projects/${code}/grants`,

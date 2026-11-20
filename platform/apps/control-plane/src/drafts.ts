@@ -9,6 +9,10 @@ import { type TestExecutor } from "./test-executor.js";
 import { dispatchProjectTestRun, dispatchReplayTestRun } from "./node-tests.js";
 import { normalizeUserCase } from "./test-cases.js";
 import { replayTestRun, runProjectTests, type TestRunResult } from "./test-runs.js";
+import { createModelClient, type ChatMessage, type ModelClient, type ToolCall } from "./llm.js";
+import { createProject } from "./projects.js";
+import { requirementSystemPrompt } from "./requirement-session.js";
+import { sessionToolDefinitions } from "./requirement-tools.js";
 
 const allowedActions = ["访问", "新增", "修改", "删除"];
 const fieldTypes = ["text", "longText", "number", "boolean", "date", "datetime", "user", "ref"];
@@ -122,6 +126,23 @@ export async function assignRole(
     [project.id, role, username],
   );
   return { assigned: true };
+}
+
+/** 用户在项目里的角色名，用于注入运行库的身份头。 */
+export async function projectRoles(
+  database: SystemDatabase,
+  projectCode: string,
+  username: string,
+): Promise<string[]> {
+  const found = await database.query<{ role_name: string }>(
+    `select project_role_members.role_name
+     from project_role_members
+     join projects on projects.id = project_role_members.project_id
+     where projects.code = $1 and project_role_members.username = $2
+     order by project_role_members.role_name`,
+    [projectCode, username],
+  );
+  return found.rows.map((row) => row.role_name);
 }
 
 export async function effectiveActions(
@@ -409,7 +430,8 @@ export async function postRequirementMessage(
   actor: PublicUser,
   projectCode: string,
   body: string,
-): Promise<{ stored: true } | { reason: string; status: number }> {
+  options: { model?: ModelClient; executor?: TestExecutor } = {},
+): Promise<{ stored: true; reply: string } | { reason: string; status: number }> {
   const config = await database.readConfig();
   if (!config["model.baseUrl"] || !config["model.name"] || !config["model.apiKey"]) {
     return { reason: "会话和运维智能体不会调用模型", status: 403 };
@@ -424,24 +446,88 @@ export async function postRequirementMessage(
   }
   const sessionId = await ownSession(database, project.id, actor.username);
   await database.query(
-    `insert into requirement_messages (id, session_id, user_id, body, created_at)
-     values (gen_random_uuid(), $1, (select id from users where username = $2), $3, now())`,
+    `insert into requirement_messages (id, session_id, user_id, body, role, created_at)
+     values (gen_random_uuid(), $1, (select id from users where username = $2), $3, 'user', now())`,
     [sessionId, actor.username, text],
   );
-  return { stored: true };
+  const history = await database.query<{ role: string; body: string }>(
+    "select role, body from requirement_messages where session_id = $1 order by created_at desc limit 40",
+    [sessionId],
+  );
+  const messages: ChatMessage[] = [
+    { role: "system", content: await requirementSystemPrompt(database, project.id, projectCode, text) },
+    ...history.rows
+      .slice()
+      .reverse()
+      .map((row): ChatMessage => (row.role === "assistant" ? { role: "assistant", content: row.body } : { role: "user", content: row.body })),
+  ];
+  const model = options.model ?? createModelClient();
+  const tools = sessionToolDefinitions();
+  let reply = "";
+  for (let round = 0; round < 4; round += 1) {
+    const result = await model({
+      config: { baseUrl: config["model.baseUrl"], name: config["model.name"], apiKey: config["model.apiKey"] },
+      messages,
+      tools,
+    });
+    if ("reason" in result) {
+      return { reason: result.reason, status: 502 };
+    }
+    const message = result.message;
+    if (!message.tool_calls || message.tool_calls.length === 0) {
+      reply = message.content ?? "";
+      break;
+    }
+    messages.push({ role: "assistant", content: message.content ?? null, tool_calls: message.tool_calls });
+    for (const call of message.tool_calls) {
+      const outcome = await invokeSessionTool(database, actor, projectCode, call, options.executor);
+      messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(outcome) });
+    }
+  }
+  if (reply.trim()) {
+    await database.query(
+      `insert into requirement_messages (id, session_id, user_id, body, role, created_at)
+       values (gen_random_uuid(), $1, (select id from users where username = $2), $3, 'assistant', now())`,
+      [sessionId, actor.username, reply],
+    );
+  }
+  return { stored: true, reply };
+}
+
+async function invokeSessionTool(
+  database: SystemDatabase,
+  actor: PublicUser,
+  projectCode: string,
+  call: ToolCall,
+  executor?: TestExecutor,
+): Promise<unknown> {
+  let args: Record<string, unknown> = {};
+  try {
+    args = call.function.arguments ? (JSON.parse(call.function.arguments) as Record<string, unknown>) : {};
+  } catch {
+    return { reason: "工具参数不是合法 JSON", status: 400 };
+  }
+  if (call.function.name === "create_project") {
+    return createProject(database, actor, {
+      name: typeof args.name === "string" ? args.name : "",
+      code: typeof args.code === "string" ? args.code : undefined,
+      containerGroup: typeof args.containerGroup === "string" ? args.containerGroup : undefined,
+    });
+  }
+  return applyTool(database, actor, projectCode, { name: call.function.name, arguments: args }, executor);
 }
 
 export async function listRequirementMessages(
   database: SystemDatabase,
   actor: PublicUser,
   projectCode: string,
-): Promise<{ messages: { body: string }[] } | { reason: string; status: number }> {
+): Promise<{ messages: { role: string; body: string }[] } | { reason: string; status: number }> {
   const project = await memberProject(database, actor, projectCode);
   if ("reason" in project) {
     return project;
   }
-  const found = await database.query<{ body: string }>(
-    `select requirement_messages.body
+  const found = await database.query<{ role: string; body: string }>(
+    `select requirement_messages.role, requirement_messages.body
      from requirement_messages
      join requirement_sessions on requirement_sessions.id = requirement_messages.session_id
      join users on users.id = requirement_sessions.user_id
@@ -503,8 +589,8 @@ export async function applyTool(
   }
   if (name === "grant_role") {
     const result = await grantAccess(database, actor, projectCode, {
-      principalType: "role",
-      principalName: stringArg(args.role),
+      principalType: stringArg(args.principalType) === "user" ? "user" : "role",
+      principalName: stringArg(args.principalName) || stringArg(args.role),
       menu: stringArg(args.menu),
       actions: Array.isArray(args.actions) ? args.actions.map(String) : [],
     });

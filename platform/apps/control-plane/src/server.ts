@@ -1,16 +1,18 @@
 import cookie from "@fastify/cookie";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { createUser, disableUser, loginWithPassword, readSession, registerAccount } from "./accounts.js";
-import { addMenu, applyOaTemplate, applyTool, assignRole, cancelPublication, confirmPublication, confirmSolution, createProjectImage, effectiveActions, grantAccess, listRequirementMessages, memberProject, managedProject, postRequirementMessage, publishedMenus, readDraft, readProjectSource, readReleaseStatus } from "./drafts.js";
-import { openDatabase } from "./database.js";
+import { addMenu, applyOaTemplate, applyTool, assignRole, cancelPublication, confirmPublication, confirmSolution, createProjectImage, effectiveActions, grantAccess, listRequirementMessages, memberProject, managedProject, postRequirementMessage, projectRoles, publishedMenus, readDraft, readProjectSource, readReleaseStatus } from "./drafts.js";
+import { openDatabase, type SystemDatabase } from "./database.js";
+import { forwardBody, forwardHeaders } from "./entry-proxy.js";
 import { dockerImageBuilder, type ImageBuildInput } from "./images.js";
 import { opensslCertificateIssuer, type NodeCertificate } from "./node-install.js";
 import { assignNodePool, poolsOverlap, prepareNodeInstall, registerNode } from "./nodes.js";
 import { type TestExecutor } from "./test-executor.js";
+import { createModelClient, type ModelClient } from "./llm.js";
 import { readTestOverview, readTestRunSteps, replayTestRun, runProjectTests } from "./test-runs.js";
 import { acceptTestJobReport, dispatchProjectTestRun, dispatchReplayTestRun } from "./node-tests.js";
 import { createPluginRuntime } from "./plugin-runtime.js";
-import { acceptHealthReport, readDesiredWork, type ReportedProject } from "./releases.js";
+import { acceptHealthReport, readDesiredWork, readProjectEntry, type ReportedProject } from "./releases.js";
 import { hashPassword } from "./passwords.js";
 import { addProjectMember, canCreateProject, createProject, listProjects } from "./projects.js";
 import { listNotifications, provisionPostgresDatabase, type DatabaseProvisioner } from "./publish.js";
@@ -21,15 +23,23 @@ import { completeWechatLogin, createWechatClient, startWechatLogin, type WechatC
 
 export async function buildServer(options?: {
   databaseUrl?: string;
+  /** 供测试注入：存在时入口路由复用该连接，不再按请求开连接。 */
+  database?: SystemDatabase;
   wechatClient?: WechatClient;
   imageBuilder?: (input: ImageBuildInput) => Promise<{ digest: string } | { reason: string }>;
   databaseProvisioner?: DatabaseProvisioner;
   certificateIssuer?: (nodeName: string) => Promise<NodeCertificate | { reason: string }>;
   pluginRuntime?: PluginRuntime;
   testExecutor?: TestExecutor;
+  modelClient?: ModelClient;
+  entryFetch?: typeof fetch;
 }): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, trustProxy: true });
   await app.register(cookie);
+  // 项目页面表单默认提交 urlencoded，这里保留原始文本，转发时原样交给运行库解析。
+  app.addContentTypeParser("application/x-www-form-urlencoded", { parseAs: "string" }, (_request, body, done) => {
+    done(null, body);
+  });
   const databaseUrl = options?.databaseUrl ?? process.env.DATABASE_SYSTEM_URL;
   const wechatClient = options?.wechatClient ?? createWechatClient();
   const imageBuilder = options?.imageBuilder ?? dockerImageBuilder();
@@ -37,6 +47,8 @@ export async function buildServer(options?: {
   const certificateIssuer = options?.certificateIssuer ?? opensslCertificateIssuer;
   const pluginRuntime = options?.pluginRuntime ?? createPluginRuntime();
   const testExecutor = options?.testExecutor;
+  const modelClient = options?.modelClient ?? createModelClient();
+  const entryFetch = options?.entryFetch ?? fetch;
   app.get("/health", async () => ({ status: "ok" }));
   app.get("/slots", async () => ({ slots: listSlots() }));
   if (databaseUrl) {
@@ -726,12 +738,14 @@ export async function buildServer(options?: {
       return;
     }
     try {
-      const projects = (request.body as { projects?: ReportedProject[] })?.projects;
+      const body = (request.body ?? {}) as { projects?: ReportedProject[]; gateway?: unknown };
+      const projects = body.projects;
       const result = await acceptHealthReport(
         database,
         (request.params as { name: string }).name,
         request.headers.authorization ?? "",
         Array.isArray(projects) ? projects : [],
+        typeof body.gateway === "string" ? body.gateway : "",
       );
       if ("reason" in result) {
         return reply.code(result.status).send({ reason: result.reason });
@@ -857,7 +871,10 @@ export async function buildServer(options?: {
       if (!actor) {
         return reply.code(401).send({ reason: "未登录" });
       }
-      const result = await postRequirementMessage(database, actor, (request.params as { code: string }).code, String((request.body as { body?: string }).body ?? ""));
+      const result = await postRequirementMessage(database, actor, (request.params as { code: string }).code, String((request.body as { body?: string }).body ?? ""), {
+        model: modelClient,
+        executor: testExecutor,
+      });
       if ("reason" in result) {
         return reply.code(result.status).send({ reason: result.reason });
       }
@@ -886,6 +903,67 @@ export async function buildServer(options?: {
       await database.close();
     }
   });
+
+  const projectEntry = async (request: FastifyRequest, reply: FastifyReply) => {
+    const injected = options?.database;
+    const database = injected ?? (databaseUrl ? await openDatabase(databaseUrl) : undefined);
+    if (!database) {
+      return reply.code(503).send({ reason: "系统库未配置" });
+    }
+    try {
+      const url = new URL(request.url, "http://platform.local");
+      const code = decodeURIComponent(url.pathname.split("/").filter(Boolean)[1] ?? "");
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        if (request.method === "GET" || request.method === "HEAD") {
+          return reply.redirect("/");
+        }
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const project = await memberProject(database, actor, code);
+      if ("reason" in project) {
+        return reply.code(project.status).send({ reason: project.reason });
+      }
+      const entry = await readProjectEntry(database, code);
+      if ("reason" in entry) {
+        return reply.code(entry.status).send({ reason: entry.reason });
+      }
+      const headers = forwardHeaders(request.headers, actor.username, await projectRoles(database, code, actor.username));
+      let upstream: Response;
+      try {
+        upstream = await entryFetch(`${entry.gateway}${url.pathname}${url.search}`, {
+          method: request.method,
+          headers,
+          body: forwardBody(request.method, request.body),
+          redirect: "manual",
+          signal: AbortSignal.timeout(30_000),
+        });
+      } catch (error) {
+        // 节点网关失联、超时或容器端口失效时给出明确原因，不暴露内部栈。
+        const reason = error instanceof Error && error.name === "TimeoutError" ? "项目入口响应超时" : "项目网关不可达";
+        return reply.code(502).send({ reason });
+      }
+      const buffer = Buffer.from(await upstream.arrayBuffer());
+      reply.code(upstream.status);
+      for (const name of ["content-type", "location", "cache-control"]) {
+        const value = upstream.headers.get(name);
+        if (value) {
+          reply.header(name, value);
+        }
+      }
+      const cookies = upstream.headers.getSetCookie();
+      if (cookies.length > 0) {
+        reply.header("set-cookie", cookies);
+      }
+      return reply.send(buffer);
+    } finally {
+      if (!injected) {
+        await database.close();
+      }
+    }
+  };
+  app.all("/p/:code", projectEntry);
+  app.all("/p/*", projectEntry);
 
   app.get("/api/projects/:code/tests", async (request, reply) => {
     const database = await requireDatabase(databaseUrl, reply);

@@ -25,7 +25,7 @@ export default defineConfig({
       {
         test: {
           name: "runtime",
-          include: ["apps/control-plane/test/runtime.test.mjs", "apps/control-plane/test/node-agent.test.mjs"],
+          include: ["apps/control-plane/test/runtime.test.mjs", "apps/control-plane/test/node-agent.test.mjs", "apps/control-plane/test/entry-proxy.test.ts"],
           environment: "node",
         },
       },

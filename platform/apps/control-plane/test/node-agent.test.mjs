@@ -1,15 +1,19 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import { judgeStep, requestForStep, runWhiteBoxCases } from "../src/test-runner.mjs";
-import { databaseUrl, reconcileProject, runTestJob } from "../src/node-agent-template.mjs";
+import { databaseUrl, gatewayUrl, parseDockerPort, proxyToProject, reconcileProject, runTestJob } from "../src/node-agent-template.mjs";
 
 const temporary = [];
 
 afterEach(async () => {
   delete process.env.PLATFORM_DATABASE_URL_TEMPLATE;
   delete process.env.PLATFORM_NODE_NAME;
+  delete process.env.PLATFORM_NODE_GATEWAY_PORT;
+  delete process.env.PLATFORM_NODE_GATEWAY_URL;
+  delete process.env.PLATFORM_NODE_ADDRESS;
   for (const directory of temporary.splice(0)) {
     await rm(directory, { recursive: true, force: true });
   }
@@ -210,5 +214,100 @@ describe("test node agent", () => {
     expect(report).toEqual({ code: "qing-jia", running: true, databaseConnected: true, imageDigest: "img", reason: undefined });
     expect(calls.find((args) => args[0] === "run")).toContain("runtime.mode=prod");
     expect(calls.find((args) => args[0] === "run")).toContain("DATABASE_URL=postgres://platform:pw@db:5432/prd_qing_jia");
+    expect(calls.find((args) => args[0] === "run")).toContain("127.0.0.1::8080");
+    expect(calls.some((args) => args[0] === "port" && args[2] === "8080/tcp")).toBe(true);
+  });
+});
+
+describe("project entry gateway", () => {
+  it("parses the published container port", () => {
+    expect(parseDockerPort("0.0.0.0:49153\n[::]:49153\n")).toBe(49153);
+    expect(parseDockerPort("")).toBe(0);
+  });
+
+  it("uses an explicit gateway url first, then the node address and port", () => {
+    process.env.PLATFORM_NODE_ADDRESS = "172.18.0.32";
+    process.env.PLATFORM_NODE_GATEWAY_PORT = "8090";
+    expect(gatewayUrl()).toBe("http://172.18.0.32:8090");
+    process.env.PLATFORM_NODE_GATEWAY_URL = "http://gateway.internal:8081/";
+    expect(gatewayUrl()).toBe("http://gateway.internal:8081");
+    // 没有显式地址时退回本机可达的非回环 IPv4，保证控制面能连上。
+    delete process.env.PLATFORM_NODE_GATEWAY_URL;
+    delete process.env.PLATFORM_NODE_ADDRESS;
+    delete process.env.PLATFORM_NODE_GATEWAY_PORT;
+    expect(gatewayUrl()).toMatch(/^http:\/\/.+:8081$/);
+    expect(gatewayUrl()).not.toContain("127.0.0.1");
+  });
+
+  it("forwards the request to the published container port with the identity headers", async () => {
+    const calls = [];
+    const request = Object.assign(Readable.from([Buffer.from('{"name":"张三"}')]), {
+      url: "/p/qing-jia/qing-jia-dan?created=1",
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-platform-user": encodeURIComponent("张三"),
+        "x-platform-roles": encodeURIComponent("部门负责人"),
+        cookie: "platform_session=secret",
+      },
+    });
+    const state = {};
+    const response = {
+      writeHead(status, headers) {
+        state.status = status;
+        state.headers = headers;
+      },
+      end(body) {
+        state.body = body;
+      },
+    };
+    await proxyToProject(
+      request,
+      response,
+      async (url, init) => {
+        calls.push({ url, init });
+        return new Response("<p>ok</p>", {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8", location: "/p/qing-jia/qing-jia-dan?created=1" },
+        });
+      },
+      new Map([["qing-jia", 49153]]),
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("http://127.0.0.1:49153/p/qing-jia/qing-jia-dan?created=1");
+    expect(calls[0].init.method).toBe("POST");
+    expect(calls[0].init.headers["content-type"]).toBe("application/json");
+    expect(calls[0].init.headers["x-platform-user"]).toBe(encodeURIComponent("张三"));
+    expect(calls[0].init.headers["x-platform-roles"]).toBe(encodeURIComponent("部门负责人"));
+    expect(calls[0].init.headers["cookie"]).toBeUndefined();
+    expect(Buffer.from(calls[0].init.body).toString("utf8")).toBe('{"name":"张三"}');
+    expect(state.status).toBe(200);
+    expect(state.headers["content-type"]).toBe("text/html; charset=utf-8");
+    expect(state.headers.location).toBe("/p/qing-jia/qing-jia-dan?created=1");
+    expect(state.body.toString("utf8")).toBe("<p>ok</p>");
+  });
+
+  it("returns 404 for a project without a published container and 502 when the container is unreachable", async () => {
+    const missing = {};
+    await proxyToProject(
+      Object.assign(Readable.from([]), { url: "/p/missing/form", method: "GET", headers: {} }),
+      { writeHead(status) { missing.status = status; }, end() {} },
+      async () => {
+        throw new Error("should not be called");
+      },
+      new Map(),
+    );
+    expect(missing.status).toBe(404);
+
+    const unreachable = {};
+    await proxyToProject(
+      Object.assign(Readable.from([]), { url: "/p/qing-jia/form", method: "GET", headers: {} }),
+      { writeHead(status) { unreachable.status = status; }, end() {} },
+      async () => {
+        throw new Error("connect refused");
+      },
+      new Map([["qing-jia", 49153]]),
+    );
+    expect(unreachable.status).toBe(502);
   });
 });

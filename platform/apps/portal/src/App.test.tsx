@@ -222,6 +222,7 @@ describe("portal shell", () => {
     expect(summary).toHaveTextContent("容器组 leave");
     expect(summary).toHaveTextContent("同组项目 请假");
     expect(summary).toHaveTextContent("设计 入库");
+    expect(screen.getByTestId("platform/project/open-entry")).toHaveAttribute("href", "/p/stock");
     expect(summary).toHaveTextContent("测试未设为发布门槛");
     vi.unstubAllGlobals();
   });
