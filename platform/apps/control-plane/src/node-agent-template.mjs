@@ -319,6 +319,35 @@ async function reportTestJob(jobId, body, requestFn = request) {
   throw lastError;
 }
 
+/** 执行过程中追加日志片段；回报失败不影响测试本身。 */
+async function reportTestLog(jobId, log, requestFn = request) {
+  if (!log) {
+    return;
+  }
+  try {
+    await requestFn("/api/nodes/" + nodeName() + "/tests/" + jobId + "/log", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ log: String(log) }),
+    });
+  } catch {
+    // 日志回报失败不影响测试执行。
+  }
+}
+
+function formatLog(label, result) {
+  const out = String(result && result.stdout ? result.stdout : "").trim();
+  const err = String(result && result.stderr ? result.stderr : "").trim();
+  const parts = [label];
+  if (out) {
+    parts.push("stdout: " + out);
+  }
+  if (err) {
+    parts.push("stderr: " + err);
+  }
+  return parts.join("\n");
+}
+
 /**
  * 在测试节点上运行一个候选镜像测试任务：
  * 拉取镜像、启动测试容器、把白盒入口和用例复制进容器、执行并上报步骤。
@@ -330,10 +359,20 @@ export async function runTestJob(job, options = {}) {
   const containerName = "platform-test-" + String(job.id).replace(/[^a-z0-9]/gi, "").slice(0, 12);
   const payloadPath = directory + "/test-payload-" + containerName + ".json";
   const runnerPath = directory + "/test-runner.mjs";
+  const logLines = [];
+  async function note(label, result) {
+    const text = formatLog(label, result);
+    logLines.push(text);
+    await reportTestLog(job.id, text, requestFn);
+  }
+  function finalLog() {
+    return logLines.join("\n");
+  }
   try {
     const pulled = await dockerFn(["pull", job.imageDigest]);
+    await note("拉取镜像", pulled);
     if (pulled.code !== 0) {
-      await reportTestJob(job.id, { reason: (pulled.stderr || pulled.stdout || "镜像拉取失败").trim() }, requestFn);
+      await reportTestJob(job.id, { reason: (pulled.stderr || pulled.stdout || "镜像拉取失败").trim(), log: finalLog() }, requestFn);
       return;
     }
     await dockerFn(["rm", "-f", containerName]);
@@ -344,13 +383,15 @@ export async function runTestJob(job, options = {}) {
     }
     args.push(job.imageDigest);
     const started = await dockerFn(args);
+    await note("启动测试容器", started);
     if (started.code !== 0) {
-      await reportTestJob(job.id, { reason: (started.stderr || started.stdout || "测试容器启动失败").trim() }, requestFn);
+      await reportTestJob(job.id, { reason: (started.stderr || started.stdout || "测试容器启动失败").trim(), log: finalLog() }, requestFn);
       return;
     }
     const health = await containerHealth(containerName, dockerFn);
+    await note("容器健康检查", { stdout: JSON.stringify(health ?? {}), stderr: "" });
     if (!health) {
-      await reportTestJob(job.id, { reason: "测试容器健康检查未返回结果" }, requestFn);
+      await reportTestJob(job.id, { reason: "测试容器健康检查未返回结果", log: finalLog() }, requestFn);
       return;
     }
     writeFileSync(
@@ -366,29 +407,32 @@ export async function runTestJob(job, options = {}) {
       "utf8",
     );
     const copiedRunner = await dockerFn(["cp", runnerPath, containerName + ":/tmp/platform-test-runner.mjs"]);
+    await note("复制测试入口", copiedRunner);
     if (copiedRunner.code !== 0) {
-      await reportTestJob(job.id, { reason: (copiedRunner.stderr || "无法复制白盒测试入口").trim() }, requestFn);
+      await reportTestJob(job.id, { reason: (copiedRunner.stderr || "无法复制白盒测试入口").trim(), log: finalLog() }, requestFn);
       return;
     }
     const copiedPayload = await dockerFn(["cp", payloadPath, containerName + ":/tmp/platform-test-payload.json"]);
+    await note("复制测试用例", copiedPayload);
     if (copiedPayload.code !== 0) {
-      await reportTestJob(job.id, { reason: (copiedPayload.stderr || "无法复制测试用例").trim() }, requestFn);
+      await reportTestJob(job.id, { reason: (copiedPayload.stderr || "无法复制测试用例").trim(), log: finalLog() }, requestFn);
       return;
     }
     const executed = await dockerFn(
       ["exec", "-e", "PLATFORM_TEST_PAYLOAD_FILE=/tmp/platform-test-payload.json", containerName, "node", "/tmp/platform-test-runner.mjs"],
       { timeoutMs: Math.max(60000, Number(job.runTimeoutSeconds ?? 900) * 1000) },
     );
+    await note("执行测试", executed);
     const parsed = lastJsonLine(executed.stdout);
     if (!parsed) {
-      await reportTestJob(job.id, { reason: (executed.stderr || executed.stdout || "白盒测试入口没有返回结果").trim() }, requestFn);
+      await reportTestJob(job.id, { reason: (executed.stderr || executed.stdout || "白盒测试入口没有返回结果").trim(), log: finalLog() }, requestFn);
       return;
     }
     if (parsed.failure) {
-      await reportTestJob(job.id, { reason: String(parsed.failure) }, requestFn);
+      await reportTestJob(job.id, { reason: String(parsed.failure), log: finalLog() }, requestFn);
       return;
     }
-    await reportTestJob(job.id, { outcomes: Array.isArray(parsed.outcomes) ? parsed.outcomes : [] }, requestFn);
+    await reportTestJob(job.id, { outcomes: Array.isArray(parsed.outcomes) ? parsed.outcomes : [], log: finalLog() }, requestFn);
   } finally {
     await dockerFn(["rm", "-f", containerName]);
     try {

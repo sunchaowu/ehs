@@ -3,7 +3,7 @@
 | 项 | 值 |
 |---|---|
 | 文档时间 | 2026-11-20 15:02:45 +0800 |
-| 状态 | 已核对 P0.5 缺口，修复两处白盒/回放缺陷，并完成模型配置下发 |
+| 状态 | 已核对 P0.5 缺口，修复两处白盒/回放缺陷，完成模型配置下发与调度可观测性 |
 | 范围 | 在线测试执行器链路盘点 + 可执行缺陷修复；黑盒执行器未实现 |
 | 验证 | 局域网控制面容器 + 独立测试库 `platform_test`，全套 87/87 通过 |
 
@@ -35,6 +35,7 @@ P0.5 的目标是「真实测试执行器」。为确定剩余工作量，对控
 
 ### 部分实现
 
+- **调度可观测性（已实现第一版）**：`test_jobs` 新增 `attempt/log` 列；节点领取任务时 `attempt` 自增；节点通过 `POST /api/nodes/:name/tests/:jobId/log` 实时回报日志片段，终态回报也带完整日志；项目成员通过 `GET /api/projects/:code/tests/runs/:runId/jobs` 查看任务状态与日志，门户测试结果卡提供「查看日志」入口。优先级与重试队列仍未实现。
 - **模型配置下发（已修复）**：`test_jobs` 新增 `model_base_url/model_name/model_api_key` 列；`NodeTestJob` 与 `/desired` 的 tests 载荷携带模型配置；节点代理写入 runner payload 时带上同样字段，为视觉定位打通前提。
 - **回放**：同步路径保留来源与来源摘要；异步路径在本次修复后同样保留。
 - **定位记录**：`TestStepOutcome.locator` 契约存在，但白盒写入的是 `step.target`，没有真正的元素定位信息。
@@ -49,7 +50,7 @@ P0.5 的目标是「真实测试执行器」。为确定剩余工作量，对控
 4. **测试报告**：Midscene HTML 报告、截图、步骤证据未产出也未留在测试区。
 5. **单步超时**：规格要求定位超时失败并记录已尝试的定位方式；当前只有 fetch 超时与容器 exec 硬超时。
 6. **手工录制**：手工操作录制成可回放黑盒记录未实现；门户也无用户案例编辑界面。
-7. **调度增强**：优先级、任务重试队列、实时日志未实现（`test_jobs` 无 priority/attempt/log 字段）。
+7. **调度增强**：实时日志已实现（见「部分实现」）；优先级与任务重试队列仍未实现（`test_jobs` 无 priority 字段）。
 8. **Vitest 白盒入口**：规格中的 Vitest 入口未实现，当前是内置 HTTP runner。
 
 ### 黑盒对发布门的实际影响
@@ -59,14 +60,14 @@ P0.5 的目标是「真实测试执行器」。为确定剩余工作量，对控
 ## 下一步建议（按投入与收益排序）
 
 1. ~~**模型配置下发**（小）~~：已完成。
-2. **调度可观测性**（中）：`test_jobs` 增加 attempt/log，节点回报实时日志片段；先解决排障困难，再谈优先级与重试队列。
+2. ~~**调度可观测性**（中）~~：已完成第一版。
 3. **黑盒第一版**（大）：确认候选镜像内可执行 Playwright/Chrome 后在 runner 实现 `open/fill/click/advance` 与三级定位；需同步改造镜像模板、依赖与模型配置下发，并补 HTML 报告落盘。
 4. **门户案例编辑与发布禁用**（中）：补用户案例编辑 UI，并在未通过测试时禁用发布按钮（后端 409 已就绪）。
 
 ## 验证记录
 
 - `pnpm exec tsc --noEmit -p tsconfig.json`：通过。
-- 控制面新增/扩充用例：`online-testing.test.ts` 6/6 通过（含自动案例 target 格式断言、异步回放元数据、模型配置下发）；`node-agent.test.mjs` 12/12 通过（含 runner payload 模型配置断言）。
+- 控制面新增/扩充用例：`online-testing.test.ts` 7/7 通过（含自动案例 target 格式断言、异步回放元数据、模型配置下发、任务 attempt 与日志）；`node-agent.test.mjs` 12/12 通过（含 runner payload 模型配置与日志回报）；`App.test.tsx` 25/25 通过（含节点任务日志面板）。
 - 控制面全套测试在局域网容器内以 `platform_test` 执行：32 个文件、87 个用例全部通过。
 - 测试前重建独立库，不触碰正式库 `platform`。
 
@@ -76,6 +77,9 @@ P0.5 的目标是「真实测试执行器」。为确定剩余工作量，对控
 - `platform/apps/control-plane/src/node-tests.ts`
 - `platform/apps/control-plane/src/node-agent-template.mjs`
 - `platform/apps/control-plane/src/schema.sql`
+- `platform/apps/control-plane/src/server.ts`
+- `platform/apps/portal/src/App.tsx`
 - `platform/apps/control-plane/test/online-testing.test.ts`
 - `platform/apps/control-plane/test/node-agent.test.mjs`
+- `platform/apps/portal/src/App.test.tsx`
 - 本文档：`docs/superpowers/plans/2026-11-20-test-executor-gaps.md`

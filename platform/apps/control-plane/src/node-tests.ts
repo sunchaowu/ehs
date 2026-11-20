@@ -39,6 +39,8 @@ type StoredJobRow = {
   model_name: string;
   model_api_key: string;
   status: string;
+  attempt: number;
+  log: string;
   replayed_from: string | null;
   replayed_from_digest: string | null;
 };
@@ -124,7 +126,7 @@ export async function claimTestJobs(database: SystemDatabase, nodeName: string, 
   await expireStaleTestJobs(database);
   const claimed = await database.query<StoredJobRow>(
     `update test_jobs
-     set status = 'running', claimed_at = now()
+     set status = 'running', claimed_at = now(), attempt = attempt + 1
      where id in (
        select id from test_jobs
        where node_name = $1 and status = 'pending'
@@ -151,12 +153,29 @@ export async function claimTestJobs(database: SystemDatabase, nodeName: string, 
   }));
 }
 
+const LOG_LIMIT = 20000;
+
+function normalizeLog(value: unknown): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.length > LOG_LIMIT ? value.slice(value.length - LOG_LIMIT) : value;
+}
+
+function joinedLog(existing: string, addition: string): string {
+  if (!addition) {
+    return existing;
+  }
+  const text = existing ? `${existing}\n${addition}` : addition;
+  return text.length > LOG_LIMIT ? text.slice(text.length - LOG_LIMIT) : text;
+}
+
 export async function acceptTestJobReport(
   database: SystemDatabase,
   nodeName: string,
   authorization: string,
   jobId: string,
-  report: { outcomes?: unknown; reason?: unknown },
+  report: { outcomes?: unknown; reason?: unknown; log?: unknown },
 ): Promise<{ accepted: true } | { reason: string; status: number }> {
   const node = await authenticateNode(database, nodeName, authorization);
   if (!node) {
@@ -172,10 +191,10 @@ export async function acceptTestJobReport(
   }
   const failure = typeof report.reason === "string" ? report.reason.trim() : "";
   const outcomes = normalizeOutcomes(report.outcomes);
-  await database.query("update test_jobs set status = 'done', finished_at = now(), failure = $2 where id = $1", [
-    job.id,
-    failure,
-  ]);
+  await database.query(
+    "update test_jobs set status = 'done', finished_at = now(), failure = $2, log = $3 where id = $1",
+    [job.id, failure, joinedLog(job.log, normalizeLog(report.log))],
+  );
   const prepared = { runId: job.run_id, digest: job.image_digest, cases: job.cases };
   if (failure) {
     await failTestRun(database, job.run_id, failure);
@@ -193,6 +212,92 @@ export async function acceptTestJobReport(
     job.replayed_from_digest,
   );
   return { accepted: true };
+}
+
+/** 节点在执行过程中追加日志片段；任务已结束后不再接受。 */
+export async function appendTestJobLog(
+  database: SystemDatabase,
+  nodeName: string,
+  authorization: string,
+  jobId: string,
+  log: unknown,
+): Promise<{ accepted: true } | { reason: string; status: number }> {
+  const node = await authenticateNode(database, nodeName, authorization);
+  if (!node) {
+    return { reason: "节点凭证无效", status: 401 };
+  }
+  const found = await database.query<StoredJobRow>("select id, node_name, status, log from test_jobs where id = $1", [jobId]);
+  const job = found.rows[0];
+  if (!job || job.node_name !== nodeName) {
+    return { reason: "测试任务不存在", status: 404 };
+  }
+  if (job.status === "done") {
+    return { reason: "测试任务已结束", status: 409 };
+  }
+  const addition = normalizeLog(log);
+  if (!addition) {
+    return { accepted: true };
+  }
+  await database.query("update test_jobs set log = $2 where id = $1", [job.id, joinedLog(job.log, addition)]);
+  return { accepted: true };
+}
+
+export type TestJobView = {
+  id: string;
+  runId: string;
+  nodeName: string;
+  status: string;
+  attempt: number;
+  log: string;
+  failure: string;
+  createdAt: Date;
+  claimedAt: Date | null;
+  finishedAt: Date | null;
+};
+
+/** 项目成员读取一次运行下的节点任务，用于排障与日志查看。 */
+export async function readTestRunJobs(
+  database: SystemDatabase,
+  projectId: string,
+  runId: string,
+): Promise<{ jobs: TestJobView[] } | { reason: string; status: number }> {
+  const found = await database.query<{ id: string }>(
+    "select id from test_runs where id = $1 and project_id = $2",
+    [runId, projectId],
+  );
+  if (!found.rows[0]) {
+    return { reason: "没有这条测试记录", status: 404 };
+  }
+  const jobs = await database.query<{
+    id: string;
+    run_id: string;
+    node_name: string;
+    status: string;
+    attempt: number;
+    log: string;
+    failure: string;
+    created_at: Date;
+    claimed_at: Date | null;
+    finished_at: Date | null;
+  }>(
+    `select id, run_id, node_name, status, attempt, log, failure, created_at, claimed_at, finished_at
+     from test_jobs where run_id = $1 order by created_at`,
+    [runId],
+  );
+  return {
+    jobs: jobs.rows.map((row) => ({
+      id: row.id,
+      runId: row.run_id,
+      nodeName: row.node_name,
+      status: row.status,
+      attempt: row.attempt,
+      log: row.log,
+      failure: row.failure,
+      createdAt: row.created_at,
+      claimedAt: row.claimed_at,
+      finishedAt: row.finished_at,
+    })),
+  };
 }
 
 function normalizeOutcomes(value: unknown): TestStepOutcome[] | null {

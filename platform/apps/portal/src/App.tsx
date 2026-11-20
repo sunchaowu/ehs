@@ -1582,6 +1582,19 @@ type TestStepView = {
   reason: string;
 };
 
+type TestJobView = {
+  id: string;
+  runId: string;
+  nodeName: string;
+  status: string;
+  attempt: number;
+  log: string;
+  failure: string;
+  createdAt: string;
+  claimedAt: string | null;
+  finishedAt: string | null;
+};
+
 type TestsView = {
   candidateDigest: string | null;
   cases: TestCaseView[];
@@ -1595,6 +1608,8 @@ const formatTime = (value: string) => new Date(value).toLocaleString("zh-CN", { 
 function TestResultsCard(props: { projectCode: string }) {
   const [tests, setTests] = useState<TestsView | null>(null);
   const [steps, setSteps] = useState<TestStepView[]>([]);
+  const [jobs, setJobs] = useState<TestJobView[]>([]);
+  const [jobsRunId, setJobsRunId] = useState("");
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const mounted = useRef(true);
@@ -1613,6 +1628,22 @@ function TestResultsCard(props: { projectCode: string }) {
       setSteps(response.ok && Array.isArray(body.steps) ? body.steps : []);
     } catch {
       setSteps([]);
+    }
+  };
+
+  const loadJobs = async (runId: string) => {
+    try {
+      const response = await fetch(`/api/projects/${props.projectCode}/tests/runs/${runId}/jobs`);
+      const body = (await response.json()) as { jobs?: TestJobView[]; reason?: string };
+      setJobsRunId(runId);
+      setJobs(response.ok && Array.isArray(body.jobs) ? body.jobs : []);
+      if (!response.ok) {
+        setReason(body.reason ?? "任务日志读取失败");
+      }
+    } catch (error) {
+      setJobsRunId(runId);
+      setJobs([]);
+      setReason(error instanceof Error ? error.message : "任务日志读取失败");
     }
   };
 
@@ -1736,6 +1767,13 @@ function TestResultsCard(props: { projectCode: string }) {
                 >
                   回放
                 </Button>,
+                <Button
+                  key="jobs"
+                  data-testid={`platform/test-results/jobs-${run.id}`}
+                  onClick={() => void loadJobs(run.id)}
+                >
+                  查看日志
+                </Button>,
               ]}
             >
               <Space direction="vertical" size={0}>
@@ -1772,6 +1810,30 @@ function TestResultsCard(props: { projectCode: string }) {
             </List.Item>
           )}
         />
+      ) : null}
+      {jobsRunId ? (
+        <div data-testid="platform/test-results/job-panel" style={{ marginTop: 16 }}>
+          <Typography.Text strong>节点任务日志</Typography.Text>
+          {jobs.length === 0 ? <Empty style={{ marginTop: 8 }} description="这次运行没有节点任务" /> : null}
+          {jobs.map((job) => (
+            <div key={job.id} data-testid={`platform/test-results/job-${job.id}`} style={{ marginTop: 8 }}>
+              <Space wrap>
+                <Tag color={job.status === "done" ? "blue" : "default"}>
+                  {job.status === "done" ? "已结束" : job.status === "running" ? "执行中" : "排队中"}
+                </Tag>
+                <Typography.Text>节点 {job.nodeName}</Typography.Text>
+                <Typography.Text type="secondary">第 {job.attempt} 次领取</Typography.Text>
+              </Space>
+              {job.failure ? <Typography.Text type="danger">{job.failure}</Typography.Text> : null}
+              <pre
+                data-testid={`platform/test-results/job-log-${job.id}`}
+                style={{ background: "#fafafa", padding: 8, overflow: "auto", maxHeight: 240, whiteSpace: "pre-wrap" }}
+              >
+                {job.log || "（暂无日志）"}
+              </pre>
+            </div>
+          ))}
+        </div>
       ) : null}
     </Card>
   );

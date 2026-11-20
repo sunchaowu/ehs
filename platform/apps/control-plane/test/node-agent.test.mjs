@@ -162,8 +162,10 @@ describe("test node agent", () => {
     expect(run).toContain("DATABASE_URL=postgres://platform:pw@db:5432/tst_qing_jia");
     expect(calls.some((args) => args[0] === "cp" && args[2].endsWith(":/tmp/platform-test-runner.mjs"))).toBe(true);
     expect(calls.some((args) => args[0] === "cp" && args[2].endsWith(":/tmp/platform-test-payload.json"))).toBe(true);
-    expect(reports[0].path).toBe("/api/nodes/test-1/tests/job-01");
-    expect(reports[0].body.outcomes[0].passed).toBe(true);
+    const terminal = reports.find((item) => item.path === "/api/nodes/test-1/tests/job-01");
+    expect(terminal.body.outcomes[0].passed).toBe(true);
+    expect(terminal.body.log).toContain("执行测试");
+    expect(reports.some((item) => item.path.endsWith("/log") && item.body.log)).toBe(true);
     expect(calls.filter((args) => args[0] === "rm" && args[1] === "-f").length).toBeGreaterThanOrEqual(2);
   });
 
@@ -235,7 +237,8 @@ describe("test node agent", () => {
       },
     );
     expect(calls.some((args) => args[0] === "run")).toBe(false);
-    expect(reports[0].body.reason).toContain("manifest unknown");
+    const terminal = reports.find((item) => item.path === "/api/nodes/test-1/tests/job-02");
+    expect(terminal.body.reason).toContain("manifest unknown");
   });
 
   it("reports project health from the runtime storage flag", async () => {

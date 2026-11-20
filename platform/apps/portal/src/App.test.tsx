@@ -359,6 +359,74 @@ describe("portal shell", () => {
     vi.unstubAllGlobals();
   });
 
+  it("shows node job logs from the test results card", async () => {
+    const admin = { username: "admin", displayName: "管理员", language: "zh-CN", platformAdmin: true, wechatBound: false };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const target = String(url);
+        if (target.endsWith("/tests/runs/run-1/jobs")) {
+          return {
+            ok: true,
+            json: async () => ({
+              jobs: [
+                {
+                  id: "job-1",
+                  runId: "run-1",
+                  nodeName: "test-1",
+                  status: "running",
+                  attempt: 2,
+                  log: "拉取镜像成功\n启动容器成功",
+                  failure: "",
+                  createdAt: "2026-11-12T08:00:00.000Z",
+                  claimedAt: "2026-11-12T08:00:01.000Z",
+                  finishedAt: null,
+                },
+              ],
+            }),
+          };
+        }
+        if (target.endsWith("/tests/runs/run-1")) {
+          return { ok: true, json: async () => ({ steps: [] }) };
+        }
+        if (target.endsWith("/tests")) {
+          return {
+            ok: true,
+            json: async () => ({
+              candidateDigest: "sha256:abcdef0123456789",
+              cases: [],
+              runs: [
+                {
+                  id: "run-1",
+                  imageDigest: "sha256:abcdef0123456789",
+                  status: "running",
+                  failure: "",
+                  replayedFrom: null,
+                  replayedFromDigest: null,
+                  startedAt: "2026-11-12T08:00:00.000Z",
+                  finishedAt: null,
+                  failedCases: [],
+                },
+              ],
+            }),
+          };
+        }
+        return { ok: true, json: async () => ({ project: { name: "请假审批", code: "leave" } }) };
+      }),
+    );
+    render(<App session={admin} title="企业应用平台" />);
+    fireEvent.click(screen.getByTestId("platform/project/new"));
+    fireEvent.change(screen.getByTestId("platform/project/name"), { target: { value: "请假审批" } });
+    fireEvent.click(screen.getByTestId("platform/project/save"));
+    expect(await screen.findByTestId("platform/test-results/card")).toBeInTheDocument();
+    fireEvent.click(await screen.findByTestId("platform/test-results/jobs-run-1"));
+    expect(await screen.findByTestId("platform/test-results/job-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("platform/test-results/job-log-job-1")).toHaveTextContent("拉取镜像成功");
+    expect(screen.getByTestId("platform/test-results/job-log-job-1")).toHaveTextContent("启动容器成功");
+    expect(screen.getByTestId("platform/test-results/job-job-1")).toHaveTextContent("第 2 次领取");
+    vi.unstubAllGlobals();
+  });
+
   it("renders system, plugin, model, and personal settings", () => {
     const config = {
       "platform.title": "企业应用平台",

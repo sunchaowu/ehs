@@ -270,6 +270,9 @@ alter table test_jobs add column if not exists replayed_from_digest text;
 alter table test_jobs add column if not exists model_base_url text not null default '';
 alter table test_jobs add column if not exists model_name text not null default '';
 alter table test_jobs add column if not exists model_api_key text not null default '';
+-- 调度可观测性：attempt 记录节点领取次数，log 保存节点回报的执行日志片段。
+alter table test_jobs add column if not exists attempt integer not null default 0;
+alter table test_jobs add column if not exists log text not null default '';
 
 create table if not exists portal_notifications (
   id uuid primary key,

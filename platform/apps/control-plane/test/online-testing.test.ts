@@ -525,4 +525,109 @@ describe("online testing", () => {
       modelApiKey: model["model.apiKey"],
     });
   }, 120000);
+
+  it("tracks job attempts and exposes node logs for troubleshooting", async () => {
+    const databaseUrl = process.env.DATABASE_SYSTEM_URL!;
+    const installed = await installAdmin();
+    app = await buildServer({
+      databaseUrl,
+      imageBuilder: async () => ({ digest }),
+      databaseProvisioner: async () => ({ created: true }),
+    });
+    const cookie = await login(app, installed.password);
+    const code = await createProjectWithDesign(app, cookie, "调度可观测性");
+    const registered = await app.inject({
+      method: "POST",
+      url: "/api/nodes",
+      cookies: { platform_session: cookie },
+      payload: { name: "test-1", zone: "测试区" },
+    });
+    const token = registered.json().token as string;
+    await app.inject({
+      method: "PUT",
+      url: "/api/nodes/test-1/pool",
+      cookies: { platform_session: cookie },
+      payload: { pool: "test" },
+    });
+
+    const dispatched = await app.inject({
+      method: "POST",
+      url: `/api/projects/${code}/tests`,
+      cookies: { platform_session: cookie },
+    });
+    expect(dispatched.statusCode).toBe(202);
+    const runId = dispatched.json().runId as string;
+
+    // 节点领取后 attempt 计为 1。
+    const desired = await app.inject({
+      method: "GET",
+      url: "/api/nodes/test-1/desired",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(desired.statusCode).toBe(200);
+    const jobs = desired.json().tests as Array<{
+      id: string;
+      cases: Array<{ code: string; name: string; steps: Array<{ index: number; target: string; expected?: string }> }>;
+    }>;
+    expect(jobs).toHaveLength(1);
+    const job = jobs[0];
+
+    const state = await openDatabase(databaseUrl);
+    const before = await state.query<{ attempt: number }>("select attempt from test_jobs where id = $1", [job.id]);
+    expect(before.rows[0].attempt).toBe(1);
+    await state.close();
+
+    // 节点执行中回报日志片段。
+    const appended = await app.inject({
+      method: "POST",
+      url: `/api/nodes/test-1/tests/${job.id}/log`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { log: "拉取镜像成功\n启动容器成功" },
+    });
+    expect(appended.statusCode).toBe(200);
+
+    // 项目成员可读取任务状态与日志。
+    const view = await app.inject({
+      method: "GET",
+      url: `/api/projects/${code}/tests/runs/${runId}/jobs`,
+      cookies: { platform_session: cookie },
+    });
+    expect(view.statusCode).toBe(200);
+    expect(view.json().jobs).toMatchObject([
+      { nodeName: "test-1", status: "running", attempt: 1, log: "拉取镜像成功\n启动容器成功" },
+    ]);
+
+    // 终态回报同样带日志，控制面落库后可继续排障。
+    const outcomes = job.cases.flatMap((testCase) =>
+      testCase.steps.map((step) => ({
+        caseCode: testCase.code,
+        caseName: testCase.name,
+        stepIndex: step.index,
+        method: "white-box",
+        locator: step.target,
+        input: { action: "call", target: step.target },
+        expected: step.expected ?? "",
+        actual: "ok",
+        passed: true,
+        reason: "",
+      })),
+    );
+    const reported = await app.inject({
+      method: "POST",
+      url: `/api/nodes/test-1/tests/${job.id}`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { outcomes, log: "执行测试完成" },
+    });
+    expect(reported.statusCode).toBe(200);
+
+    const verified = await openDatabase(databaseUrl);
+    const after = await verified.query<{ status: string; log: string }>(
+      "select status, log from test_jobs where id = $1",
+      [job.id],
+    );
+    expect(after.rows[0].status).toBe("done");
+    expect(after.rows[0].log).toContain("拉取镜像成功");
+    expect(after.rows[0].log).toContain("执行测试完成");
+    await verified.close();
+  }, 120000);
 });
