@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// 发布门槛用例串行全套时可能逼近默认 5 秒超时。
+vi.setConfig({ testTimeout: 15_000 });
 import { openDatabase } from "../src/database.js";
 import { projectDatabaseName, registryWithPort, runDockerBuild } from "../src/images.js";
 import { installInitialAdmin } from "../src/install-admin.js";
@@ -79,6 +82,16 @@ describe("release confirmation", () => {
       testAdminUrl: "postgres://platform@127.0.0.1:5432/test",
       registryAddress: "registry.internal",
     });
+    // 同一测试库被多个文件复用，显式清掉节点池，避免上一个测试留下配置。
+    const resetConfig = await openDatabase(databaseUrl!);
+    const initialConfig = await resetConfig.readConfig();
+    await resetConfig.saveConfig({
+      ...initialConfig,
+      "test.nodePool": "",
+      "scheduler.defaultNodePool": "",
+      "test.requirePassBeforePublish": true,
+    });
+    await resetConfig.close();
     let provisions = 0;
     app = await buildServer({
       databaseUrl,

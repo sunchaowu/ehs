@@ -126,6 +126,78 @@ export async function addProjectMember(
   return { added: true };
 }
 
+export type ProjectMemberView = { username: string; displayName: string; projectAdmin: boolean };
+
+async function requireProjectAdmin(
+  database: SystemDatabase,
+  actor: PublicUser,
+  projectCode: string,
+): Promise<{ id: string } | { reason: string; status: number }> {
+  const found = await database.query<{ id: string }>(
+    `select projects.id from projects
+     join project_members on project_members.project_id = projects.id
+     join users on users.id = project_members.user_id
+     where projects.code = $1 and users.username = $2 and project_members.project_admin`,
+    [projectCode, actor.username],
+  );
+  const row = found.rows[0];
+  return row ? { id: row.id } : { reason: "没有项目管理权限", status: 403 };
+}
+
+export async function listProjectMembers(
+  database: SystemDatabase,
+  actor: PublicUser,
+  projectCode: string,
+): Promise<{ members: ProjectMemberView[] } | { reason: string; status: number }> {
+  const project = await requireProjectAdmin(database, actor, projectCode);
+  if ("reason" in project) {
+    return project;
+  }
+  const found = await database.query<{ username: string; display_name: string; project_admin: boolean }>(
+    `select users.username, users.display_name, project_members.project_admin
+     from project_members
+     join users on users.id = project_members.user_id
+     where project_members.project_id = $1
+     order by users.username`,
+    [project.id],
+  );
+  return {
+    members: found.rows.map((row) => ({
+      username: row.username,
+      displayName: row.display_name,
+      projectAdmin: row.project_admin,
+    })),
+  };
+}
+
+export async function removeProjectMember(
+  database: SystemDatabase,
+  actor: PublicUser,
+  projectCode: string,
+  username: string,
+): Promise<{ removed: true } | { reason: string; status: number }> {
+  const project = await requireProjectAdmin(database, actor, projectCode);
+  if ("reason" in project) {
+    return project;
+  }
+  if (username === actor.username) {
+    return { reason: "不能移除自己", status: 400 };
+  }
+  const removed = await database.query(
+    "delete from project_members where project_id = $1 and user_id = (select id from users where username = $2)",
+    [project.id, username],
+  );
+  if ((removed.rowCount ?? 0) === 0) {
+    return { reason: "成员不存在", status: 404 };
+  }
+  // 用户离开项目后不应继续通过角色继承授权。
+  await database.query(
+    "delete from project_role_members where project_id = $1 and username = $2",
+    [project.id, username],
+  );
+  return { removed: true };
+}
+
 async function unusedCode(database: SystemDatabase, base: string): Promise<string> {
   let suffix = 2;
   let candidate = base;

@@ -62,7 +62,12 @@ describe("shared container publication", () => {
     });
     const configured = await openDatabase(databaseUrl!);
     const config = await configured.readConfig();
-    await configured.saveConfig({ ...config, "test.requirePassBeforePublish": false });
+    await configured.saveConfig({
+      ...config,
+      "test.requirePassBeforePublish": false,
+      "test.nodePool": "",
+      "scheduler.defaultNodePool": "",
+    });
     await configured.close();
     let builtFiles: Record<string, string> = {};
     app = await buildServer({

@@ -1,4 +1,4 @@
-import { HomeOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SettingOutlined, AppstoreOutlined, CloudOutlined } from "@ant-design/icons";
+import { HomeOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SettingOutlined, AppstoreOutlined, CloudOutlined, TeamOutlined, SafetyCertificateOutlined } from "@ant-design/icons";
 import { Alert, Avatar, Button, Card, Checkbox, ConfigProvider, Drawer, Dropdown, Empty, Form, Input, InputNumber, Layout, List, Menu, Space, Spin, Switch, Tag, Typography } from "antd";
 import enUS from "antd/locale/en_US";
 import zhCN from "antd/locale/zh_CN";
@@ -43,9 +43,34 @@ export type SystemConfigView = {
   modelKeyConfigured: boolean;
 };
 
-type Section = "system" | "plugin" | "model" | "account";
+type Section = "system" | "plugin" | "model" | "users" | "account";
 
 type ProjectSummary = { name: string; code: string; containerGroup: string; projectAdmin: boolean };
+
+type DraftMenuView = { code: string; name: string; parent_code: string | null };
+type DraftGrantView = { principal_type: string; principal_name: string; menu_code: string; action: string };
+type ManagedUserView = {
+  username: string;
+  displayName: string;
+  language: string;
+  platformAdmin: boolean;
+  disabled: boolean;
+  wechatBound: boolean;
+};
+type ProjectMemberView = { username: string; displayName: string; projectAdmin: boolean };
+type ProjectAccessView = {
+  menus: DraftMenuView[];
+  roles: Array<{ name: string; members: string[] }>;
+  grants: DraftGrantView[];
+};
+type SolutionChangeView = {
+  added: { menus: DraftMenuView[]; grants: DraftGrantView[] };
+  modified: Array<
+    | { kind: "menu"; code: string; changes: { name?: { from: string; to: string }; parent_code?: { from: string | null; to: string | null } } }
+    | { kind: "grant"; principal_type: string; principal_name: string; menu_code: string; added_actions: string[]; removed_actions: string[] }
+  >;
+  removed: { menus: DraftMenuView[]; grants: DraftGrantView[] };
+};
 
 export type PluginSummary = {
   id: string;
@@ -239,6 +264,7 @@ function Workbench(props: {
           { key: "system", icon: <SettingOutlined />, label: <span data-testid="platform/shell/nav-system-config">{copy.system}</span> },
           { key: "plugin", icon: <AppstoreOutlined />, label: <span data-testid="platform/shell/nav-plugin-config">{copy.plugin}</span> },
           { key: "model", icon: <CloudOutlined />, label: <span data-testid="platform/shell/nav-model-config">{copy.model}</span> },
+          { key: "users", icon: <TeamOutlined />, label: <span data-testid="platform/shell/nav-users">{copy.users}</span> },
         ]
       : []),
   ];
@@ -254,7 +280,7 @@ function Workbench(props: {
     />
   );
   const editingTitle =
-    section === "system" ? copy.system : section === "plugin" ? copy.plugin : section === "model" ? copy.model : section === "account" ? copy.personal : project ? project.name : creating ? copy.projectName : copy.home;
+    section === "system" ? copy.system : section === "plugin" ? copy.plugin : section === "model" ? copy.model : section === "users" ? copy.users : section === "account" ? copy.personal : project ? project.name : creating ? copy.projectName : copy.home;
   const languageChoices = props.languages.includes(props.session.language) ? props.languages : [props.session.language, ...props.languages];
   return (
     <Layout data-testid="platform/shell/root" className="platform-shell">
@@ -357,6 +383,7 @@ function Workbench(props: {
           ) : null}
           {section === "plugin" && props.session.platformAdmin ? <PluginPage plugins={props.plugins} /> : null}
           {section === "model" && props.session.platformAdmin ? <ModelPage config={props.config} /> : null}
+          {section === "users" && props.session.platformAdmin ? <UserManagementPage /> : null}
           {section === "account" ? <AccountPage session={props.session} /> : null}
           {section === null && project ? (
             <ProjectPage project={project} modelConfigured={props.modelConfigured} modelNotice={copy.modelUnavailable} />
@@ -834,6 +861,334 @@ function AccountPage(props: { session: SessionUser }) {
   );
 }
 
+function UserManagementPage() {
+  const [users, setUsers] = useState<ManagedUserView[]>([]);
+  const [loadError, setLoadError] = useState("");
+  const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [busy, setBusy] = useState("");
+  const [form] = Form.useForm();
+  const load = () => {
+    void fetch("/api/users")
+      .then(async (response) => {
+        const body = (await response.json()) as { users?: ManagedUserView[]; reason?: string };
+        if (!response.ok) {
+          setLoadError(body.reason ?? "用户列表读取失败");
+          return;
+        }
+        setUsers(body.users ?? []);
+      })
+      .catch(() => setLoadError("用户列表读取失败"));
+  };
+  useEffect(load, []);
+  return (
+    <Card
+      data-testid="platform/users/page"
+      title="用户管理"
+      extra={<Typography.Text type="secondary">共 {users.length} 名用户</Typography.Text>}
+    >
+      {loadError ? <Alert type="error" showIcon message={loadError} style={{ marginBottom: 16 }} /> : null}
+      {feedback ? (
+        <Alert data-testid="platform/users/feedback" type={feedback.type} showIcon message={feedback.message} style={{ marginBottom: 16 }} />
+      ) : null}
+      <Form
+        form={form}
+        layout="inline"
+        style={{ marginBottom: 16 }}
+        initialValues={{ username: "", displayName: "", password: "" }}
+        onFinish={async (values: { username: string; displayName: string; password: string }) => {
+          setFeedback(null);
+          const response = await fetch("/api/users", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(values),
+          });
+          const body = (await response.json().catch(() => ({}))) as { reason?: string };
+          if (!response.ok) {
+            setFeedback({ type: "error", message: body.reason ?? "创建失败" });
+            return;
+          }
+          form.resetFields();
+          setFeedback({ type: "success", message: `${values.username} 已创建` });
+          load();
+        }}
+      >
+        <Form.Item name="username" label="用户名" rules={[{ required: true, whitespace: true, message: "请输入用户名" }]}>
+          <Input data-testid="platform/users/username" />
+        </Form.Item>
+        <Form.Item name="displayName" label="显示名" rules={[{ required: true, whitespace: true, message: "请输入显示名" }]}>
+          <Input data-testid="platform/users/display-name" />
+        </Form.Item>
+        <Form.Item name="password" label="密码" rules={[{ required: true, message: "请输入密码" }]}>
+          <Input.Password data-testid="platform/users/password" autoComplete="new-password" />
+        </Form.Item>
+        <Button htmlType="submit" type="primary" data-testid="platform/users/create">创建用户</Button>
+      </Form>
+      <List
+        dataSource={users}
+        locale={{ emptyText: "暂无用户" }}
+        renderItem={(user) => (
+          <List.Item
+            data-testid={`platform/users/row-${user.username}`}
+            actions={[
+              <Button
+                key="toggle"
+                size="small"
+                loading={busy === user.username}
+                data-testid={`platform/users/toggle-${user.username}`}
+                onClick={async () => {
+                  setBusy(user.username);
+                  setFeedback(null);
+                  const action = user.disabled ? "enable" : "disable";
+                  const response = await fetch(`/api/users/${encodeURIComponent(user.username)}/${action}`, { method: "POST" });
+                  setBusy("");
+                  if (!response.ok) {
+                    const body = (await response.json().catch(() => ({}))) as { reason?: string };
+                    setFeedback({ type: "error", message: body.reason ?? "操作失败" });
+                    return;
+                  }
+                  setFeedback({ type: "success", message: `${user.username} 已${user.disabled ? "启用" : "停用"}` });
+                  load();
+                }}
+              >
+                {user.disabled ? "启用" : "停用"}
+              </Button>,
+            ]}
+          >
+            <List.Item.Meta
+              title={<span>{user.displayName}（{user.username}）</span>}
+              description={
+                <Space wrap size={8}>
+                  <Tag data-testid={`platform/users/state-${user.username}`}>{user.disabled ? "已停用" : "正常"}</Tag>
+                  {user.platformAdmin ? <Tag color="blue">平台管理员</Tag> : null}
+                  <span>{user.language}</span>
+                  <span>微信{user.wechatBound ? "已绑定" : "未绑定"}</span>
+                </Space>
+              }
+            />
+          </List.Item>
+        )}
+      />
+    </Card>
+  );
+}
+
+function AccessManagementPage(props: { project: { name: string; code: string }; onBack: () => void }) {
+  const [members, setMembers] = useState<ProjectMemberView[]>([]);
+  const [access, setAccess] = useState<ProjectAccessView | null>(null);
+  const [error, setError] = useState("");
+  const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [memberForm] = Form.useForm();
+  const [roleForm] = Form.useForm();
+  const [grantForm] = Form.useForm();
+  const load = () => {
+    setError("");
+    void Promise.all([
+      fetch(`/api/projects/${props.project.code}/members`),
+      fetch(`/api/projects/${props.project.code}/grants`),
+    ])
+      .then(async ([memberResponse, grantResponse]) => {
+        const memberBody = (await memberResponse.json()) as { members?: ProjectMemberView[]; reason?: string };
+        const grantBody = (await grantResponse.json()) as { access?: ProjectAccessView; reason?: string };
+        if (!memberResponse.ok || !grantResponse.ok) {
+          setError(memberBody.reason ?? grantBody.reason ?? "授权数据读取失败");
+          return;
+        }
+        setMembers(memberBody.members ?? []);
+        setAccess(grantBody.access ?? null);
+      })
+      .catch(() => setError("授权数据读取失败"));
+  };
+  useEffect(load, [props.project.code]);
+  const mutate = async (url: string, method: "POST" | "DELETE", body: unknown, successMessage: string) => {
+    setFeedback(null);
+    const response = await fetch(url, {
+      method,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = (await response.json().catch(() => ({}))) as { reason?: string };
+    if (!response.ok) {
+      setFeedback({ type: "error", message: payload.reason ?? `${successMessage}失败` });
+      return;
+    }
+    setFeedback({ type: "success", message: successMessage });
+    load();
+  };
+  const grantKey = (grant: DraftGrantView) =>
+    `${grant.principal_type}-${grant.principal_name}-${grant.menu_code}-${grant.action}`;
+  return (
+    <Card
+      data-testid="platform/access/page"
+      title="授权管理"
+      extra={<Button data-testid="platform/access/back" onClick={props.onBack}>返回草稿</Button>}
+    >
+      <Typography.Paragraph>项目 {props.project.name} 的成员、角色与草稿授权。发布后菜单按已发布授权生效。</Typography.Paragraph>
+      {error ? <Alert type="error" showIcon message={error} style={{ marginBottom: 16 }} /> : null}
+      {feedback ? (
+        <Alert data-testid="platform/access/feedback" type={feedback.type} showIcon message={feedback.message} style={{ marginBottom: 16 }} />
+      ) : null}
+      <Typography.Title level={5}>项目成员</Typography.Title>
+      <Form
+        form={memberForm}
+        layout="inline"
+        style={{ marginBottom: 8 }}
+        initialValues={{ username: "", projectAdmin: false }}
+        onFinish={async (values: { username: string; projectAdmin: boolean }) => {
+          await mutate(
+            `/api/projects/${props.project.code}/members`,
+            "POST",
+            { username: values.username, projectAdmin: values.projectAdmin },
+            `${values.username} 已加入项目`,
+          );
+          memberForm.resetFields();
+        }}
+      >
+        <Form.Item name="username" label="用户名" rules={[{ required: true, whitespace: true, message: "请输入用户名" }]}>
+          <Input data-testid="platform/access/member-username" />
+        </Form.Item>
+        <Form.Item name="projectAdmin" label="项目管理员" valuePropName="checked">
+          <Checkbox data-testid="platform/access/member-admin" />
+        </Form.Item>
+        <Button htmlType="submit" type="primary" data-testid="platform/access/member-add">添加成员</Button>
+      </Form>
+      {members.map((member) => (
+        <Typography.Paragraph key={member.username} data-testid={`platform/access/member-row-${member.username}`}>
+          {member.displayName}（{member.username}）{member.projectAdmin ? " · 项目管理员" : ""}
+          <Button
+            size="small"
+            danger
+            style={{ marginLeft: 8 }}
+            data-testid={`platform/access/member-remove-${member.username}`}
+            onClick={() =>
+              void mutate(
+                `/api/projects/${props.project.code}/members/${encodeURIComponent(member.username)}`,
+                "DELETE",
+                undefined,
+                `${member.username} 已移出项目`,
+              )
+            }
+          >
+            移除
+          </Button>
+        </Typography.Paragraph>
+      ))}
+      <Typography.Title level={5}>角色</Typography.Title>
+      <Form
+        form={roleForm}
+        layout="inline"
+        style={{ marginBottom: 8 }}
+        initialValues={{ role: "", username: "" }}
+        onFinish={async (values: { role: string; username: string }) => {
+          await mutate(
+            `/api/projects/${props.project.code}/roles/assign`,
+            "POST",
+            values,
+            `${values.username} 已加入角色 ${values.role}`,
+          );
+          roleForm.resetFields();
+        }}
+      >
+        <Form.Item name="role" label="角色" rules={[{ required: true, whitespace: true, message: "请输入角色" }]}>
+          <Input data-testid="platform/access/role-name" />
+        </Form.Item>
+        <Form.Item name="username" label="用户名" rules={[{ required: true, whitespace: true, message: "请输入用户名" }]}>
+          <Input data-testid="platform/access/role-user" />
+        </Form.Item>
+        <Button htmlType="submit" type="primary" data-testid="platform/access/role-assign">分配角色</Button>
+      </Form>
+      {(access?.roles ?? []).map((role) => (
+        <Typography.Paragraph key={role.name} data-testid={`platform/access/role-row-${role.name}`}>
+          {role.name}：{role.members.length > 0 ? role.members.join("、") : "暂无成员"}
+          {role.members.map((member) => (
+            <Button
+              key={member}
+              size="small"
+              danger
+              style={{ marginLeft: 8 }}
+              data-testid={`platform/access/role-unassign-${role.name}-${member}`}
+              onClick={() =>
+                void mutate(
+                  `/api/projects/${props.project.code}/roles/assign`,
+                  "DELETE",
+                  { role: role.name, username: member },
+                  `${member} 已退出角色 ${role.name}`,
+                )
+              }
+            >
+              取消 {member}
+            </Button>
+          ))}
+        </Typography.Paragraph>
+      ))}
+      <Typography.Title level={5}>草稿授权</Typography.Title>
+      <Form
+        form={grantForm}
+        layout="inline"
+        style={{ marginBottom: 8 }}
+        initialValues={{ principalType: "user", principalName: "", menu: "", actions: "访问" }}
+        onFinish={async (values: { principalType: string; principalName: string; menu: string; actions: string }) => {
+          const actions = String(values.actions)
+            .split(/[,，]/)
+            .map((item) => item.trim())
+            .filter(Boolean);
+          await mutate(
+            `/api/projects/${props.project.code}/grants`,
+            "POST",
+            {
+              principalType: values.principalType,
+              principalName: values.principalName,
+              menu: values.menu,
+              actions,
+            },
+            "授权已添加",
+          );
+          grantForm.resetFields();
+        }}
+      >
+        <Form.Item name="principalType" label="主体类型" rules={[{ required: true, message: "请输入 user 或 role" }]}>
+          <Input data-testid="platform/access/grant-type" />
+        </Form.Item>
+        <Form.Item name="principalName" label="主体" rules={[{ required: true, whitespace: true, message: "请输入主体" }]}>
+          <Input data-testid="platform/access/grant-name" />
+        </Form.Item>
+        <Form.Item name="menu" label="菜单编码" rules={[{ required: true, whitespace: true, message: "请输入菜单编码" }]}>
+          <Input data-testid="platform/access/grant-menu" />
+        </Form.Item>
+        <Form.Item name="actions" label="动作（逗号分隔）" rules={[{ required: true, message: "请输入动作" }]}>
+          <Input data-testid="platform/access/grant-actions" />
+        </Form.Item>
+        <Button htmlType="submit" type="primary" data-testid="platform/access/grant-add">添加授权</Button>
+      </Form>
+      {(access?.grants ?? []).map((grant) => (
+        <Typography.Paragraph key={grantKey(grant)} data-testid={`platform/access/grant-row-${grantKey(grant)}`}>
+          {grantLabel(grant)}
+          <Button
+            size="small"
+            danger
+            style={{ marginLeft: 8 }}
+            data-testid={`platform/access/grant-remove-${grantKey(grant)}`}
+            onClick={() =>
+              void mutate(
+                `/api/projects/${props.project.code}/grants`,
+                "DELETE",
+                {
+                  principalType: grant.principal_type,
+                  principalName: grant.principal_name,
+                  menu: grant.menu_code,
+                  action: grant.action,
+                },
+                "授权已撤销",
+              )
+            }
+          >
+            撤销
+          </Button>
+        </Typography.Paragraph>
+      ))}
+    </Card>
+  );
+}
+
 function LoginPage(props: {
   wechatAvailable: boolean;
   reason: string;
@@ -1245,10 +1600,92 @@ type ReleaseView = {
   testResult?: { required?: boolean; passed?: boolean; failedCases?: string[] };
 };
 
+function menuLabel(menu: DraftMenuView): string {
+  return `${menu.name}（${menu.code}${menu.parent_code ? `，上级 ${menu.parent_code}` : ""}）`;
+}
+
+function grantLabel(grant: DraftGrantView): string {
+  return `${grant.principal_type === "role" ? "角色" : "用户"} ${grant.principal_name} · ${grant.menu_code} · ${grant.action}`;
+}
+
+function SolutionConfirmPage(props: { project: { name: string; code: string }; onBack: () => void }) {
+  const [change, setChange] = useState<SolutionChangeView | null>(null);
+  const [error, setError] = useState("");
+  const [revision, setRevision] = useState("");
+  const [confirming, setConfirming] = useState(false);
+  useEffect(() => {
+    void fetch(`/api/projects/${props.project.code}/change`)
+      .then(async (response) => {
+        const body = (await response.json()) as { change?: SolutionChangeView; reason?: string };
+        if (!response.ok) {
+          setError(body.reason ?? "增量读取失败");
+          return;
+        }
+        setChange(body.change ?? null);
+      })
+      .catch(() => setError("增量读取失败"));
+  }, [props.project.code]);
+  const total = change
+    ? change.added.menus.length + change.added.grants.length + change.modified.length + change.removed.menus.length + change.removed.grants.length
+    : 0;
+  return (
+    <Card
+      data-testid="platform/solution/page"
+      title="方案确认"
+      extra={<Button data-testid="platform/solution/back" onClick={props.onBack}>返回草稿</Button>}
+    >
+      <Typography.Paragraph>项目 {props.project.name} 当前草稿相对已发布版本的增量。确认后生成设计、测试案例与源码，正式菜单不变。</Typography.Paragraph>
+      {error ? <Alert type="error" showIcon message={error} style={{ marginBottom: 16 }} /> : null}
+      {revision ? <Alert type="success" showIcon message={`方案已确认，源码版本 ${revision}`} style={{ marginBottom: 16 }} /> : null}
+      {change ? (
+        <div data-testid="platform/solution/summary">
+          <Typography.Paragraph>共 {total} 项变更：新增 {change.added.menus.length + change.added.grants.length}、修改 {change.modified.length}、删除 {change.removed.menus.length + change.removed.grants.length}。</Typography.Paragraph>
+          <Typography.Title level={5}>新增</Typography.Title>
+          {change.added.menus.map((item) => <Typography.Paragraph key={`menu-${item.code}`} data-testid="platform/solution/added-menu">菜单 {menuLabel(item)}</Typography.Paragraph>)}
+          {change.added.grants.map((item) => <Typography.Paragraph key={`grant-${item.principal_type}-${item.principal_name}-${item.menu_code}-${item.action}`} data-testid="platform/solution/added-grant">授权 {grantLabel(item)}</Typography.Paragraph>)}
+          <Typography.Title level={5}>修改</Typography.Title>
+          {change.modified.map((item, index) => (
+            <Typography.Paragraph key={`modified-${index}`} data-testid="platform/solution/modified-item">
+              {item.kind === "menu"
+                ? `菜单 ${item.code}：${Object.entries(item.changes).map(([field, value]) => `${field} ${JSON.stringify(value?.from)} → ${JSON.stringify(value?.to)}`).join("；")}`
+                : `授权 ${item.principal_type} ${item.principal_name} · ${item.menu_code}：新增动作 ${item.added_actions.join("、") || "无"}；移除动作 ${item.removed_actions.join("、") || "无"}`}
+            </Typography.Paragraph>
+          ))}
+          <Typography.Title level={5}>删除</Typography.Title>
+          {change.removed.menus.map((item) => <Typography.Paragraph key={`removed-menu-${item.code}`} data-testid="platform/solution/removed-menu">菜单 {menuLabel(item)}</Typography.Paragraph>)}
+          {change.removed.grants.map((item) => <Typography.Paragraph key={`removed-grant-${item.principal_type}-${item.principal_name}-${item.menu_code}-${item.action}`} data-testid="platform/solution/removed-grant">授权 {grantLabel(item)}</Typography.Paragraph>)}
+          {total === 0 ? <Empty description="没有变更" image={Empty.PRESENTED_IMAGE_SIMPLE} /> : null}
+        </div>
+      ) : null}
+      <Button
+        type="primary"
+        data-testid="platform/solution/confirm"
+        loading={confirming}
+        style={{ marginTop: 16 }}
+        onClick={async () => {
+          setConfirming(true);
+          setError("");
+          const response = await fetch(`/api/projects/${props.project.code}/confirm`, { method: "POST" });
+          const body = (await response.json()) as { sourceRevision?: string; reason?: string };
+          setConfirming(false);
+          if (!response.ok) {
+            setError(body.reason ?? "方案确认失败");
+            return;
+          }
+          setRevision(body.sourceRevision ?? "");
+        }}
+      >
+        确认方案
+      </Button>
+    </Card>
+  );
+}
+
 function ProjectPage(props: { project: { name: string; code: string }; modelConfigured: boolean; modelNotice: string }) {
   const [reason, setReason] = useState("");
   const [templateState, setTemplateState] = useState("");
   const [release, setRelease] = useState<ReleaseView | null>(null);
+  const [view, setView] = useState<"draft" | "confirm" | "access">("draft");
   const [messages, setMessages] = useState<Array<{ role: string; body: string }>>([]);
   const [sending, setSending] = useState(false);
   const loadMessages = () => {
@@ -1268,6 +1705,12 @@ function ProjectPage(props: { project: { name: string; code: string }; modelConf
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.project.code]);
   const waiting = (release?.nodes ?? []).filter((node) => !node.healthy).map((node) => `${node.name}：${node.reason ?? "尚未报告"}`);
+  if (view === "confirm") {
+    return <SolutionConfirmPage project={props.project} onBack={() => setView("draft")} />;
+  }
+  if (view === "access") {
+    return <AccessManagementPage project={props.project} onBack={() => setView("draft")} />;
+  }
   return (
     <div>
       {props.modelConfigured ? null : <Alert type="warning" showIcon message={props.modelNotice} style={{ marginBottom: 16 }} />}
@@ -1275,6 +1718,18 @@ function ProjectPage(props: { project: { name: string; code: string }; modelConf
         <Card data-testid="platform/project/draft" title="草稿" style={{ flex: 1 }}>
           <Typography.Title level={3}>{props.project.name}</Typography.Title>
           <Space wrap>
+          <Button
+            data-testid="platform/project/solution"
+            onClick={() => setView("confirm")}
+          >
+            方案确认
+          </Button>
+          <Button
+            data-testid="platform/project/access"
+            onClick={() => setView("access")}
+          >
+            授权管理
+          </Button>
           <Button
             data-testid="platform/project/release"
             onClick={async () => {

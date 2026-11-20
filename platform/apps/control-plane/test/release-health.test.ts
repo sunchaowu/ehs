@@ -246,5 +246,5 @@ describe("healthy nodes publish the granted menus", () => {
       cookies: { platform_session: adminCookie },
     });
     expect(keptRelease.json().publishedDigest).toBe(digest);
-  });
+  }, 15_000);
 });

@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// 在线测试会在容器内跑白盒用例，串行全套时单个用例可能超过默认 5 秒。
+vi.setConfig({ testTimeout: 30_000 });
 import { openDatabase } from "../src/database.js";
 import { installInitialAdmin } from "../src/install-admin.js";
 import { buildServer } from "../src/server.js";
@@ -93,12 +96,24 @@ describe("online testing", () => {
     await reset.query("delete from users");
     await reset.query("delete from nodes");
     await reset.close();
-    return installInitialAdmin(databaseUrl!, {
+    const installed = await installInitialAdmin(databaseUrl!, {
       title: "企业应用平台",
       prodAdminUrl: testAdminUrl,
       testAdminUrl,
       registryAddress: "registry.internal",
     });
+    // installInitialAdmin 只填默认值，不覆盖已有配置；串行跑全套时必须显式恢复可达库与空节点池。
+    const configured = await openDatabase(databaseUrl!);
+    const config = await configured.readConfig();
+    await configured.saveConfig({
+      ...config,
+      "database.testAdminUrl": testAdminUrl,
+      "test.nodePool": "",
+      "scheduler.defaultNodePool": "",
+      "test.requirePassBeforePublish": true,
+    });
+    await configured.close();
+    return installed;
   }
 
   async function login(server: NonNullable<typeof app>, password: string) {

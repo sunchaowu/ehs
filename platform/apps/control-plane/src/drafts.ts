@@ -13,6 +13,7 @@ import { createModelClient, type ChatMessage, type ModelClient, type ToolCall } 
 import { createProject } from "./projects.js";
 import { requirementSystemPrompt } from "./requirement-session.js";
 import { sessionToolDefinitions } from "./requirement-tools.js";
+import { diffSolution, type DraftGrant, type SolutionChange } from "./solution-diff.js";
 
 const allowedActions = ["访问", "新增", "修改", "删除"];
 const fieldTypes = ["text", "longText", "number", "boolean", "date", "datetime", "user", "ref"];
@@ -145,8 +146,7 @@ export async function projectRoles(
   return found.rows.map((row) => row.role_name);
 }
 
-export async function effectiveActions(
-  database: SystemDatabase,
+export async function effectiveActions(  database: SystemDatabase,
   projectCode: string,
   username: string,
   menuCode: string,
@@ -171,6 +171,106 @@ export async function effectiveActions(
     [projectCode, menuCode, username],
   );
   return allowedActions.filter((action) => found.rows.some((row) => row.action === action));
+}
+
+export type ProjectAccessView = {
+  menus: Array<{ code: string; name: string; parent_code: string | null }>;
+  roles: Array<{ name: string; members: string[] }>;
+  grants: DraftGrant[];
+};
+
+/** 项目授权管理页的只读视图：草稿菜单、角色及其成员、草稿授权。 */
+export async function listProjectAccess(
+  database: SystemDatabase,
+  actor: PublicUser,
+  projectCode: string,
+): Promise<{ access: ProjectAccessView } | { reason: string; status: number }> {
+  const project = await managedProject(database, actor, projectCode);
+  if ("reason" in project) {
+    return project;
+  }
+  const menus = await database.query<{ code: string; name: string; parent_code: string | null }>(
+    "select code, name, parent_code from draft_menus where project_id = $1 order by sort",
+    [project.id],
+  );
+  const roles = await database.query<{ name: string }>(
+    "select name from project_roles where project_id = $1 order by name",
+    [project.id],
+  );
+  const members = await database.query<{ role_name: string; username: string }>(
+    "select role_name, username from project_role_members where project_id = $1 order by username",
+    [project.id],
+  );
+  const grants = await database.query<DraftGrant>(
+    `select principal_type, principal_name, menu_code, action from draft_grants
+     where project_id = $1 order by principal_type, principal_name, menu_code, action`,
+    [project.id],
+  );
+  return {
+    access: {
+      menus: menus.rows,
+      roles: roles.rows.map((role) => ({
+        name: role.name,
+        members: members.rows.filter((item) => item.role_name === role.name).map((item) => item.username),
+      })),
+      grants: grants.rows,
+    },
+  };
+}
+
+export async function revokeGrant(
+  database: SystemDatabase,
+  actor: PublicUser,
+  projectCode: string,
+  request: { principalType?: string; principalName?: string; menu?: string; action?: string },
+): Promise<{ revoked: true } | { reason: string; status: number }> {
+  const project = await managedProject(database, actor, projectCode);
+  if ("reason" in project) {
+    return project;
+  }
+  if (request.principalType !== "user" && request.principalType !== "role") {
+    return { reason: "授权对象无效", status: 400 };
+  }
+  const principalName = request.principalName?.trim() ?? "";
+  const menu = request.menu?.trim() ?? "";
+  const action = request.action?.trim() ?? "";
+  if (!principalName || !menu || !action) {
+    return { reason: "请输入授权对象、菜单和操作", status: 400 };
+  }
+  const revoked = await database.query(
+    `delete from draft_grants
+     where project_id = $1 and principal_type = $2 and principal_name = $3 and menu_code = $4 and action = $5`,
+    [project.id, request.principalType, principalName, menu, action],
+  );
+  if ((revoked.rowCount ?? 0) === 0) {
+    return { reason: "授权不存在", status: 404 };
+  }
+  return { revoked: true };
+}
+
+export async function unassignRole(
+  database: SystemDatabase,
+  actor: PublicUser,
+  projectCode: string,
+  request: { role?: string; username?: string },
+): Promise<{ unassigned: true } | { reason: string; status: number }> {
+  const project = await managedProject(database, actor, projectCode);
+  if ("reason" in project) {
+    return project;
+  }
+  const role = request.role?.trim() ?? "";
+  const username = request.username?.trim() ?? "";
+  if (!role || !username) {
+    return { reason: "请输入角色和用户", status: 400 };
+  }
+  const removed = await database.query(
+    "delete from project_role_members where project_id = $1 and role_name = $2 and username = $3",
+    [project.id, role, username],
+  );
+  if ((removed.rowCount ?? 0) === 0) {
+    return { reason: "角色成员不存在", status: 404 };
+  }
+  return { unassigned: true };
 }
 
 export type ApplyTemplateResult = {
@@ -263,12 +363,12 @@ export async function applyOaTemplate(
       [project.id, grant.role],
     );
     for (const action of grant.actions) {
-      const inserted = await database.query<{ id: string }>(
+      const inserted = await database.query(
         `insert into draft_grants (project_id, principal_type, principal_name, menu_code, action)
-         values ($1, 'role', $2, $3, $4) on conflict do nothing returning id`,
+         values ($1, 'role', $2, $3, $4) on conflict do nothing`,
         [project.id, grant.role, menuCode, action],
       );
-      if (inserted.rows[0]) {
+      if ((inserted.rowCount ?? 0) > 0) {
         grantCount += 1;
       }
     }
@@ -300,28 +400,60 @@ export async function applyOaTemplate(
   };
 }
 
-export async function confirmSolution(
+/** 方案确认页的只读预览：草稿相对已发布版本的真实增量。 */
+export async function previewSolution(
   database: SystemDatabase,
   actor: PublicUser,
   projectCode: string,
-): Promise<{ change: { added: unknown; modified: unknown[]; removed: unknown[] }; sourceRevision: string } | { reason: string; status: number }> {
+): Promise<{ change: SolutionChange } | { reason: string; status: number }> {
   const project = await managedProject(database, actor, projectCode);
   if ("reason" in project) {
     return project;
   }
-  const menus = await database.query("select code, name, parent_code from draft_menus where project_id = $1 order by sort", [project.id]);
-  const grants = await database.query(
-    "select principal_type, principal_name, menu_code, action from draft_grants where project_id = $1",
-    [project.id],
+  const change = await projectChange(database, project.id);
+  return { change };
+}
+
+async function projectChange(database: SystemDatabase, projectId: string): Promise<SolutionChange> {
+  const menus = await database.query<{ code: string; name: string; parent_code: string | null }>(
+    "select code, name, parent_code from draft_menus where project_id = $1 order by sort",
+    [projectId],
   );
-  const added = { menus: menus.rows, grants: grants.rows };
+  const grants = await database.query<{ principal_type: string; principal_name: string; menu_code: string; action: string }>(
+    "select principal_type, principal_name, menu_code, action from draft_grants where project_id = $1",
+    [projectId],
+  );
+  const publishedMenus = await database.query<{ code: string; name: string; parent_code: string | null }>(
+    "select code, name, parent_code from published_menus where project_id = $1",
+    [projectId],
+  );
+  const publishedGrants = await database.query<{ principal_type: string; principal_name: string; menu_code: string; action: string }>(
+    "select principal_type, principal_name, menu_code, action from published_grants where project_id = $1",
+    [projectId],
+  );
+  return diffSolution(
+    { menus: menus.rows, grants: grants.rows },
+    { menus: publishedMenus.rows, grants: publishedGrants.rows },
+  );
+}
+
+export async function confirmSolution(
+  database: SystemDatabase,
+  actor: PublicUser,
+  projectCode: string,
+): Promise<{ change: SolutionChange; sourceRevision: string } | { reason: string; status: number }> {
+  const project = await managedProject(database, actor, projectCode);
+  if ("reason" in project) {
+    return project;
+  }
+  const change = await projectChange(database, project.id);
   await database.query(
     `insert into openspec_changes (id, project_id, added, modified, removed, confirmed_at)
-     values (gen_random_uuid(), $1, $2::jsonb, '[]'::jsonb, '[]'::jsonb, now())`,
-    [project.id, JSON.stringify(added)],
+     values (gen_random_uuid(), $1, $2::jsonb, $3::jsonb, $4::jsonb, now())`,
+    [project.id, JSON.stringify(change.added), JSON.stringify(change.modified), JSON.stringify(change.removed)],
   );
   const compiled = await storeCompiledDesign(database, project.id);
-  return { change: { added, modified: [], removed: [] }, sourceRevision: compiled.sourceRevision };
+  return { change, sourceRevision: compiled.sourceRevision };
 }
 
 export async function readProjectSource(

@@ -94,6 +94,7 @@ create table if not exists draft_menus (
   project_id uuid not null references projects (id) on delete cascade,
   code text not null,
   name text not null,
+  parent_code text,
   sort integer not null,
   unique (project_id, code)
 );
@@ -188,6 +189,8 @@ create table if not exists published_menus (
   parent_code text,
   primary key (project_id, code)
 );
+
+alter table published_menus add column if not exists parent_code text;
 
 create table if not exists published_grants (
   project_id uuid not null references projects (id) on delete cascade,

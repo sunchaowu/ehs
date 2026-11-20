@@ -26,6 +26,10 @@ describe("projects", () => {
     await database.query("delete from users");
     await database.close();
     const installed = await installInitialAdmin(databaseUrl!, input);
+    const configured = await openDatabase(databaseUrl!);
+    const config = await configured.readConfig();
+    await configured.saveConfig({ ...config, "registration.enabled": true });
+    await configured.close();
     app = await buildServer({ databaseUrl });
     const registered = await app.inject({
       method: "POST",

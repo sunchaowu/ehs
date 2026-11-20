@@ -95,8 +95,7 @@ export async function readProjectEntry(
   return { reason: "项目容器尚未在目标节点就绪", status: 503 };
 }
 
-export async function readProjectRelease(database: SystemDatabase, projectCode: string) {
-  const project = await database.query<{ id: string; container_group: string }>(
+export async function readProjectRelease(database: SystemDatabase, projectCode: string) {  const project = await database.query<{ id: string; container_group: string }>(
     `select projects.id, container_groups.code as container_group
      from projects
      join container_groups on container_groups.id = projects.container_group_id
@@ -241,9 +240,9 @@ async function snapshotPublished(database: SystemDatabase, projectId: string, di
   await database.query("delete from published_grants where project_id = $1", [projectId]);
   for (const menu of design.menus) {
     await database.query(
-      `insert into published_menus (project_id, code, name) values ($1, $2, $3)
-       on conflict (project_id, code) do update set name = excluded.name`,
-      [projectId, menu.code, menu.name],
+      `insert into published_menus (project_id, code, name, parent_code) values ($1, $2, $3, $4)
+       on conflict (project_id, code) do update set name = excluded.name, parent_code = excluded.parent_code`,
+      [projectId, menu.code, menu.name, menu.parentCode],
     );
   }
   for (const grant of design.grants) {

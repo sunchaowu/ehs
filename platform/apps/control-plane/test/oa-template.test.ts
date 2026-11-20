@@ -60,7 +60,7 @@ describe("oa template", () => {
       menus: 5,
       entities: 4,
       workflows: 1,
-      grants: 14,
+      grants: 18,
       cases: 5,
     });
     const draft = await app.inject({
