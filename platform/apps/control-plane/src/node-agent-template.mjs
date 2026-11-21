@@ -6,7 +6,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { hostname, networkInterfaces } from "node:os";
 import { pathToFileURL } from "node:url";
@@ -359,6 +359,8 @@ export async function runTestJob(job, options = {}) {
   const containerName = "platform-test-" + String(job.id).replace(/[^a-z0-9]/gi, "").slice(0, 12);
   const payloadPath = directory + "/test-payload-" + containerName + ".json";
   const runnerPath = directory + "/test-runner.mjs";
+  // Midscene HTML 报告与截图留在测试节点，不进入正式区。
+  const reportDir = directory + "/test-reports/" + String(job.runId ?? "run").replace(/[^a-z0-9]/gi, "") + "-" + job.id.replace(/[^a-z0-9]/gi, "");
   const logLines = [];
   async function note(label, result) {
     const text = formatLog(label, result);
@@ -423,6 +425,19 @@ export async function runTestJob(job, options = {}) {
       { timeoutMs: Math.max(60000, Number(job.runTimeoutSeconds ?? 900) * 1000) },
     );
     await note("执行测试", executed);
+    if ((job.cases ?? []).some(function (testCase) { return testCase.method === "black-box"; })) {
+      // 把容器里的 Midscene HTML 报告与步骤截图拷回测试节点留存。
+      try {
+        mkdirSync(reportDir, { recursive: true });
+        const copied = await dockerFn(["cp", containerName + ":/tmp/platform-test-report/.", reportDir]);
+        await note("留存测试报告", {
+          stdout: copied.code === 0 ? "报告目录：" + reportDir : "",
+          stderr: copied.code === 0 ? "" : copied.stderr || "测试报告拷贝失败",
+        });
+      } catch (error) {
+        await note("留存测试报告", { stdout: "", stderr: error instanceof Error ? error.message : String(error) });
+      }
+    }
     const parsed = lastJsonLine(executed.stdout);
     if (!parsed) {
       await reportTestJob(job.id, { reason: (executed.stderr || executed.stdout || "白盒测试入口没有返回结果").trim(), log: finalLog() }, requestFn);

@@ -3,7 +3,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
-import { judgeStep, requestForStep, runWhiteBoxCases } from "../src/test-runner.mjs";
+import {
+  bootstrapBrowser,
+  createMidsceneVisualLocator,
+  judgeStep,
+  locateElement,
+  midscenePrompt,
+  openPathForTarget,
+  requestForStep,
+  runAllCases,
+  runBlackBoxCases,
+  runWhiteBoxCases,
+  visualLocate,
+  workflowPathForTarget,
+} from "../src/test-runner.mjs";
 import { databaseUrl, gatewayUrl, parseDockerPort, proxyToProject, reconcileProject, runTestJob } from "../src/node-agent-template.mjs";
 
 const temporary = [];
@@ -105,7 +118,7 @@ describe("white-box test runner", () => {
     expect(outcomes[0].passed).toBe(true);
     expect(outcomes[0].actual).toContain("r1");
     expect(outcomes[1].passed).toBe(false);
-    expect(outcomes[1].reason).toContain("黑盒执行器未配置");
+    expect(outcomes[1].reason).toContain("黑盒步骤需由黑盒执行器处理");
     expect(outcomes[2].passed).toBe(false);
     expect(outcomes[2].reason).toContain("不受支持");
   });
@@ -353,5 +366,408 @@ describe("project entry gateway", () => {
       new Map([["qing-jia", 49153]]),
     );
     expect(unreachable.status).toBe(502);
+  });
+});
+
+describe("black-box test runner", () => {
+  function fakePage(elements = {}) {
+    const calls = [];
+    function locatorFor(exists, selector) {
+      return {
+        async count() {
+          return exists ? 1 : 0;
+        },
+        async isVisible() {
+          return Boolean(exists);
+        },
+        async fill(value) {
+          calls.push(["fill", selector, value]);
+        },
+        async click() {
+          calls.push(["click", selector]);
+        },
+      };
+    }
+    const page = {
+      calls,
+      async goto(url) {
+        calls.push(["goto", url]);
+      },
+      async screenshot(args) {
+        calls.push(["screenshot", args?.path ?? null]);
+        return Buffer.from("png");
+      },
+      locator(selector) {
+        calls.push(["locator", selector]);
+        return locatorFor(elements[selector], selector);
+      },
+      getByRole(role, options) {
+        const key = `role:${role}:${options.name}`;
+        calls.push(["getByRole", role, options.name]);
+        return locatorFor(elements[key], key);
+      },
+      mouse: {
+        click() {
+          calls.push(["mouse.click"]);
+          throw new Error("禁止坐标点击");
+        },
+      },
+    };
+    return page;
+  }
+
+  function modelResponse(content, status = 200) {
+    return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status });
+  }
+
+  it("maps step targets to runtime page addresses", () => {
+    expect(openPathForTarget("qing-jia/qing-jia-dan/form")).toBe("/p/qing-jia/qing-jia-dan/form");
+    expect(openPathForTarget("qing-jia/qing-jia-dan")).toBe("/p/qing-jia/qing-jia-dan");
+    expect(workflowPathForTarget("qing-jia/请假流程/submit")).toBe("/p/qing-jia/workflows/%E8%AF%B7%E5%81%87%E6%B5%81%E7%A8%8B");
+  });
+
+  it("executes open/fill/click through stable test ids and never uses coordinates", async () => {
+    const page = fakePage({
+      '[data-testid="qing-jia/qing-jia-dan/form"]': true,
+      '[data-testid="qing-jia/qing-jia-dan/申请人"]': true,
+      '[data-testid="qing-jia/qing-jia-dan/submit"]': true,
+    });
+    const cases = [
+      {
+        code: "c1",
+        name: "新增请假单",
+        method: "black-box",
+        steps: [
+          { index: 1, action: "open", target: "qing-jia/qing-jia-dan/form", expected: "表单打开" },
+          { index: 2, action: "fill", target: "qing-jia/qing-jia-dan/申请人", value: "张三", expected: "已输入" },
+          { index: 3, action: "click", target: "qing-jia/qing-jia-dan/submit", expected: "保存成功" },
+        ],
+      },
+    ];
+    const { outcomes } = await runBlackBoxCases(cases, { page });
+    expect(outcomes).toHaveLength(3);
+    expect(outcomes.every((outcome) => outcome.passed)).toBe(true);
+    expect(outcomes[0].actual).toBe("/p/qing-jia/qing-jia-dan/form");
+    expect(outcomes[1].locator).toContain("stable:");
+    expect(page.calls.some((call) => call[0] === "fill" && call[2] === "张三")).toBe(true);
+    expect(page.calls.some((call) => call[0] === "click")).toBe(true);
+    expect(page.calls.some((call) => call[0] === "mouse.click")).toBe(false);
+  });
+
+  it("falls back to role and accessible name when the stable id is absent", async () => {
+    const page = fakePage({ "role:textbox:申请人": true });
+    const cases = [
+      {
+        code: "c2",
+        name: "角色定位",
+        method: "black-box",
+        steps: [{ index: 1, action: "fill", target: "qing-jia/qing-jia-dan/申请人", value: "李四", expected: "已输入" }],
+      },
+    ];
+    const { outcomes } = await runBlackBoxCases(cases, { page });
+    expect(outcomes[0].passed).toBe(true);
+    expect(outcomes[0].locator).toContain("role:textbox");
+    expect(page.calls.some((call) => call[0] === "getByRole" && call[2] === "申请人")).toBe(true);
+  });
+
+  it("uses model visual localization and caches the successful selector", async () => {
+    const page = fakePage({ '[data-testid="visual-1"]': true });
+    let modelCalls = 0;
+    const fetchImpl = async (url, init) => {
+      modelCalls += 1;
+      expect(url).toBe("http://vllm.internal:8000/v1/chat/completions");
+      expect(init.headers.authorization).toBe("Bearer secret");
+      expect(JSON.parse(init.body).messages[1].content[1].image_url.url).toContain("data:image/png;base64,");
+      return modelResponse('[data-testid="visual-1"]');
+    };
+    const cases = [
+      {
+        code: "c3",
+        name: "视觉定位",
+        method: "black-box",
+        steps: [
+          { index: 1, action: "fill", target: "qing-jia/qing-jia-dan/申请人", value: "王五", expected: "已输入" },
+          { index: 2, action: "fill", target: "qing-jia/qing-jia-dan/申请人", value: "赵六", expected: "已输入" },
+        ],
+      },
+    ];
+    const { outcomes } = await runBlackBoxCases(cases, {
+      page,
+      fetchImpl,
+      takeScreenshot: async () => Buffer.from("png"),
+      model: { baseUrl: "http://vllm.internal:8000/v1/", name: "qwen2.5-vl", apiKey: "secret" },
+    });
+    expect(outcomes.every((outcome) => outcome.passed)).toBe(true);
+    expect(outcomes[0].locator).toContain("css:[data-testid=\"visual-1\"]");
+    expect(outcomes[1].locator).toContain("css:[data-testid=\"visual-1\"]");
+    expect(modelCalls).toBe(1);
+    expect(page.calls.some((call) => call[0] === "mouse.click")).toBe(false);
+  });
+
+  it("fails with a clear reason when the model returns coordinates or cannot see images", async () => {
+    const page = fakePage();
+    const options = {
+      page,
+      takeScreenshot: async () => Buffer.from("png"),
+      model: { baseUrl: "http://vllm.internal:8000/v1", name: "qwen2.5-vl", apiKey: "secret" },
+      fetchImpl: async () => modelResponse("点击坐标 (123, 456)"),
+    };
+    const step = { index: 1, action: "click", target: "qing-jia/qing-jia-dan/submit", expected: "保存成功" };
+    const coordinates = await visualLocate(step.target, step, options);
+    expect(coordinates.reason).toContain("坐标");
+    expect(coordinates.reason).toContain("禁止坐标点击");
+
+    const blind = await visualLocate(step.target, step, {
+      ...options,
+      fetchImpl: async () => modelResponse("ERROR: 当前模型不支持输入图片"),
+    });
+    expect(blind.reason).toContain("不支持输入图片");
+
+    const failed = await visualLocate(step.target, step, {
+      ...options,
+      fetchImpl: async () => modelResponse("服务不可用", 500),
+    });
+    expect(failed.reason).toContain("HTTP 500");
+
+    const unconfigured = await visualLocate(step.target, step, { page, model: {} });
+    expect(unconfigured.reason).toContain("视觉定位未配置模型");
+    expect(page.calls.some((call) => call[0] === "mouse.click")).toBe(false);
+  });
+
+  it("reports a clear failure when no browser is available", async () => {
+    const cases = [
+      {
+        code: "c4",
+        name: "无浏览器",
+        method: "black-box",
+        steps: [{ index: 1, action: "open", target: "qing-jia/qing-jia-dan/form", expected: "表单打开" }],
+      },
+    ];
+    const { outcomes } = await runBlackBoxCases(cases, { browserReason: "浏览器依赖未就绪：Chromium 缺失" });
+    expect(outcomes[0].passed).toBe(false);
+    expect(outcomes[0].reason).toContain("浏览器依赖未就绪");
+  });
+
+  it("writes an HTML report with screenshots into the test area", async () => {
+    const page = fakePage({ '[data-testid="qing-jia/qing-jia-dan/submit"]': true });
+    const files = {};
+    const fs = {
+      async mkdir(dir) {
+        files[dir] = files[dir] ?? {};
+      },
+      async writeFile(path, content) {
+        files[path] = content;
+      },
+    };
+    const cases = [
+      {
+        code: "c5",
+        name: "报告",
+        method: "black-box",
+        steps: [{ index: 1, action: "click", target: "qing-jia/qing-jia-dan/submit", expected: "保存成功" }],
+      },
+    ];
+    const { reportDir, outcomes } = await runBlackBoxCases(cases, { page, reportDir: "/tmp/platform-test-report", fs });
+    expect(reportDir).toBe("/tmp/platform-test-report");
+    expect(files["/tmp/platform-test-report/report.html"]).toContain("黑盒测试报告");
+    expect(files["/tmp/platform-test-report/report.html"]).toContain("截图");
+    expect(outcomes[0].screenshot).toBe("step-c5-1.png");
+    expect(page.calls.some((call) => call[0] === "screenshot" && call[1] === "/tmp/platform-test-report/step-c5-1.png")).toBe(true);
+  });
+
+  it("opens a workflow page before advancing a step", async () => {
+    const page = fakePage({ '[data-testid="qing-jia/请假流程/submit"]': true });
+    const cases = [
+      {
+        code: "c6",
+        name: "流程走查",
+        method: "black-box",
+        steps: [{ index: 1, action: "advance", target: "qing-jia/请假流程/submit", expected: "迁移成功" }],
+      },
+    ];
+    const { outcomes } = await runBlackBoxCases(cases, { page });
+    expect(outcomes[0].passed).toBe(true);
+    expect(page.calls.some((call) => call[0] === "goto" && call[1].includes("/p/qing-jia/workflows/"))).toBe(true);
+    expect(page.calls.some((call) => call[0] === "click")).toBe(true);
+  });
+
+  it("dispatches white-box and black-box cases to their executors", async () => {
+    const page = fakePage({ '[data-testid="qing-jia/qing-jia-dan/submit"]': true });
+    const result = await runAllCases(
+      [
+        { code: "w", name: "接口", method: "white-box", steps: [{ index: 1, action: "call", target: "a/b.create", value: "{}", expected: "返回" }] },
+        { code: "b", name: "界面", method: "black-box", steps: [{ index: 1, action: "click", target: "qing-jia/qing-jia-dan/submit", expected: "成功" }] },
+      ],
+      {
+        page,
+        fetchImpl: async () =>
+          new Response(JSON.stringify({ record: { id: "r1" } }), { status: 201, headers: { "content-type": "application/json" } }),
+      },
+    );
+    expect(result.outcomes).toHaveLength(2);
+    expect(result.outcomes[0].caseCode).toBe("w");
+    expect(result.outcomes[0].passed).toBe(true);
+    expect(result.outcomes[1].caseCode).toBe("b");
+    expect(result.outcomes[1].passed).toBe(true);
+  });
+
+  it("tries the whole locator chain before reporting a visual failure", async () => {
+    const page = fakePage();
+    const context = { lastLocators: {} };
+    const locate = await locateElement(
+      "qing-jia/qing-jia-dan/submit",
+      { action: "click", target: "qing-jia/qing-jia-dan/submit" },
+      {
+        page,
+        context,
+        model: { baseUrl: "http://vllm.internal:8000/v1", name: "qwen2.5-vl", apiKey: "secret" },
+        takeScreenshot: async () => Buffer.from("png"),
+        fetchImpl: async () => modelResponse("ERROR: 无法识别该元素"),
+      },
+    );
+    expect(locate.reason).toContain("已尝试");
+    expect(locate.attempts.some((text) => text.startsWith("stable:"))).toBe(true);
+    expect(locate.attempts.some((text) => text.startsWith("role:"))).toBe(true);
+    expect(locate.attempts.some((text) => text.startsWith("visual:"))).toBe(true);
+  });
+
+  it("translates steps into Midscene aiAct prompts and reports failures", async () => {
+    expect(midscenePrompt("qing-jia/qing-jia-dan/申请人", { action: "fill", target: "x", value: "张三" })).toContain("张三");
+    expect(midscenePrompt("qing-jia/qing-jia-dan/submit", { action: "click" })).toContain("保存");
+    expect(midscenePrompt("qing-jia/请假流程/submit", { action: "advance" })).toContain("流程步骤");
+
+    const calls = [];
+    const visualLocator = createMidsceneVisualLocator({
+      async aiAct(prompt) {
+        calls.push(prompt);
+      },
+    });
+    const performed = await visualLocator("qing-jia/qing-jia-dan/submit", { action: "click" });
+    expect(performed.performed).toBe(true);
+    expect(calls).toHaveLength(1);
+
+    const failed = createMidsceneVisualLocator({
+      async aiAct() {
+        throw new Error("模型无法理解截图");
+      },
+    });
+    const reason = await failed("qing-jia/qing-jia-dan/submit", { action: "click" });
+    expect(reason.reason).toContain("模型无法理解截图");
+  });
+
+  it("accepts Midscene-performed steps without coordinate clicks", async () => {
+    const page = fakePage();
+    const cases = [
+      {
+        code: "c7",
+        name: "Midscene 代执行",
+        method: "black-box",
+        steps: [
+          { index: 1, action: "click", target: "qing-jia/qing-jia-dan/submit", expected: "保存成功" },
+          { index: 2, action: "fill", target: "qing-jia/qing-jia-dan/申请人", value: "张三", expected: "已输入" },
+        ],
+      },
+    ];
+    const { outcomes } = await runBlackBoxCases(cases, {
+      page,
+      model: { baseUrl: "http://vllm.internal:8000/v1", name: "qwen2.5-vl", apiKey: "secret" },
+      visualLocator: createMidsceneVisualLocator({ async aiAct() {} }),
+    });
+    expect(outcomes.every((outcome) => outcome.passed)).toBe(true);
+    expect(outcomes[0].locator).toBe("midscene:aiAct");
+    expect(page.calls.some((call) => call[0] === "mouse.click")).toBe(false);
+    expect(page.calls.some((call) => call[0] === "fill" || call[0] === "click")).toBe(false);
+  });
+
+  it("bootstraps Playwright and Midscene with model env vars and no secret leaks", async () => {
+    const env = {
+      PLATFORM_BROWSER_MODULE: "playwright-mock",
+      PLATFORM_MIDSCENE_MODULE: "midscene-mock",
+      PLATFORM_CHROMIUM_PATH: "/usr/bin/chromium",
+    };
+    const page = fakePage();
+    let closed = false;
+    const imported = [];
+    const modules = {
+      "playwright-mock": {
+        chromium: {
+          async launch(launch) {
+            expect(launch.executablePath).toBe("/usr/bin/chromium");
+            expect(launch.headless).toBe(true);
+            return {
+              async newPage() {
+                return page;
+              },
+              async close() {
+                closed = true;
+              },
+            };
+          },
+        },
+      },
+      "midscene-mock": {
+        PlaywrightAgent: class {
+          constructor(agentPage) {
+            expect(agentPage).toBe(page);
+          }
+          async aiAct() {}
+        },
+      },
+    };
+    const browser = await bootstrapBrowser({
+      env,
+      timeoutSeconds: 12,
+      importModule: async (path) => {
+        imported.push(path);
+        return modules[path];
+      },
+      model: { baseUrl: "http://vllm.internal:8000/v1/", name: "qwen2.5-vl", apiKey: "secret-key" },
+    });
+    expect(browser.page).toBe(page);
+    expect(browser.visualLocator).toBeTypeOf("function");
+    expect(browser.midsceneReason).toBe("");
+    expect(env.MIDSCENE_MODEL_BASE_URL).toBe("http://vllm.internal:8000/v1");
+    expect(env.MIDSCENE_MODEL_NAME).toBe("qwen2.5-vl");
+    expect(env.MIDSCENE_MODEL_API_KEY).toBe("secret-key");
+    expect(env.MIDSCENE_MODEL_PROTOCOL).toBe("openai-chat");
+    expect(env.MIDSCENE_MODEL_FAMILY).toBe("qwen2.5-vl");
+    expect(imported).toEqual(["playwright-mock", "midscene-mock"]);
+    const performed = await browser.visualLocator("qing-jia/qing-jia-dan/submit", { action: "click" });
+    expect(performed.performed).toBe(true);
+    await browser.close();
+    expect(closed).toBe(true);
+  });
+
+  it("keeps browser working when Midscene cannot load and reports why", async () => {
+    const env = { PLATFORM_BROWSER_MODULE: "playwright-mock", PLATFORM_MIDSCENE_MODULE: "missing-midscene" };
+    const page = fakePage();
+    const modules = {
+      "playwright-mock": {
+        chromium: {
+          async launch() {
+            return {
+              async newPage() {
+                return page;
+              },
+              async close() {},
+            };
+          },
+        },
+      },
+    };
+    const browser = await bootstrapBrowser({
+      env,
+      importModule: async (path) => {
+        if (!modules[path]) {
+          throw new Error("模块不存在：" + path);
+        }
+        return modules[path];
+      },
+      model: { baseUrl: "http://vllm.internal:8000/v1", name: "qwen2.5-vl", apiKey: "secret-key" },
+    });
+    expect(browser.page).toBe(page);
+    expect(browser.visualLocator).toBeUndefined();
+    expect(browser.midsceneReason).toContain("Midscene 未就绪");
+    expect(browser.midsceneReason).not.toContain("secret-key");
   });
 });

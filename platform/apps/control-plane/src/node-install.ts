@@ -68,7 +68,8 @@ export PLATFORM_NODE_DIR="$dir"
 # mTLS material: client.crt client.key ca.crt
 # 项目数据库连接串放在本机 $dir/database.url，用 {database} 占位数据库名；
 # 也可以用 PLATFORM_DATABASE_URL_TEMPLATE 覆盖。安装脚本不写数据库地址。
-# 测试任务由控制面通过 /desired 下发，代理在测试容器内运行白盒入口并回报步骤。
+# 测试任务由控制面通过 /desired 下发；代理在测试容器内运行测试入口，
+# 白盒走 HTTP 断言，黑盒走 Playwright/Chromium + Midscene 视觉定位，HTML 报告留在测试区。
 # 入口网关默认监听 8081，并上报本机非回环 IPv4；
 # 可用 PLATFORM_NODE_GATEWAY_PORT、PLATFORM_NODE_ADDRESS、PLATFORM_NODE_GATEWAY_URL 覆盖。
 exec node "$dir/agent.mjs"

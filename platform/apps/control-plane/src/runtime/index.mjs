@@ -435,6 +435,36 @@ async function pageRoute(request, response, method, parts, modules, store) {
   if (!module) {
     return sendHtml(response, 404, "<h1>项目模块不存在</h1>");
   }
+
+  // 流程页面必须在实体解析前处理：parts[2] 是 "workflows"，不是实体名。
+  // 每个步骤一个按钮，稳定标识与黑盒 advance 步骤 target 完全一致。
+  if (parts[2] === "workflows") {
+    if (parts.length === 3 && method === "GET") {
+      return sendHtml(response, 200, workflowListPage(module));
+    }
+    const workflowName = decodeURIComponent(parts[3] ?? "");
+    const workflow = module.workflows.find((item) => item.name === workflowName);
+    if (!workflow) {
+      return sendHtml(response, 404, "<h1>流程不存在</h1>");
+    }
+    if (parts.length === 4 && method === "GET") {
+      const position = await store.workflowPosition(code, workflowName);
+      return sendHtml(response, 200, workflowPage(module, workflow, position));
+    }
+    if (parts.length === 5 && method === "POST") {
+      const step = decodeURIComponent(parts[4]);
+      const position = await store.workflowPosition(code, workflowName);
+      if (step === workflow.steps[position]) {
+        await store.advance(code, workflowName, step);
+      }
+      response.writeHead(303, {
+        location: `/p/${encodeURIComponent(code)}/workflows/${encodeURIComponent(workflowName)}?advanced=${encodeURIComponent(step)}`,
+      });
+      return response.end();
+    }
+    return sendHtml(response, 405, "<h1>方法不支持</h1>");
+  }
+
   const entityName = decodeURIComponent(parts[2]);
   const entity = module.entities.find((item) => item.name === entityName);
   if (!entity) {
@@ -444,7 +474,8 @@ async function pageRoute(request, response, method, parts, modules, store) {
 
   if (!suffix && method === "GET") {
     const records = await store.list(code, entity.name);
-    return sendHtml(response, 200, listPage(module, entity, records));
+    const created = new URL(request.url ?? "/", "http://runtime.local").searchParams.get("created") === "1";
+    return sendHtml(response, 200, listPage(module, entity, records, created));
   }
   if (suffix === "form" && method === "GET") {
     return sendHtml(response, 200, formPage(module, entity, ""));
@@ -464,42 +495,51 @@ async function pageRoute(request, response, method, parts, modules, store) {
 
 function indexPage(modules) {
   const items = [...modules.values()]
-    .map(
-      (module) =>
-        `<li>${escapeHtml(module.projectCode)}
-           <ul>${module.entities
-             .map(
-               (entity) =>
-                 `<li><a href="/p/${encodeURIComponent(module.projectCode)}/${encodeURIComponent(entity.name)}">${escapeHtml(entity.name)}</a></li>`,
-             )
-             .join("")}</ul>
-         </li>`,
-    )
+    .map((module) => {
+      const entities = module.entities
+        .map(
+          (entity) =>
+            `<li><a href="/p/${encodeURIComponent(module.projectCode)}/${encodeURIComponent(entity.name)}">${escapeHtml(entity.name)}</a></li>`,
+        )
+        .join("");
+      const workflows = module.workflows
+        .map(
+          (workflow) =>
+            `<li><a href="/p/${encodeURIComponent(module.projectCode)}/workflows/${encodeURIComponent(workflow.name)}">${escapeHtml(workflow.name)}</a></li>`,
+        )
+        .join("");
+      return `<li>${escapeHtml(module.projectCode)}
+           <ul>${entities}${workflows ? `<li>流程<ul>${workflows}</ul></li>` : ""}</ul>
+         </li>`;
+    })
     .join("");
   return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>项目模块</title><body><h1>项目模块</h1><ul>${items}</ul></body></html>`;
 }
 
 function formPage(module, entity, reason) {
+  const stable = (suffix) => `${module.projectCode}/${entity.name}/${suffix}`;
   const inputs = entity.fields
     .map((field) => {
       const type = field.type === "number" ? "number" : field.type === "date" ? "date" : "text";
       const hint = field.type === "ref" ? `引用 ${field.target}` : field.type;
+      // 稳定标识与黑盒 fill 步骤 target 完全一致，Playwright 优先用它定位。
       return `<label>${escapeHtml(field.name)}（${escapeHtml(hint)}）
-        <input name="${escapeHtml(field.name)}" type="${type}" required></label>`;
+        <input name="${escapeHtml(field.name)}" type="${type}" required data-testid="${escapeHtml(stable(field.name))}"></label>`;
     })
     .join("");
   return pageShell(
     module,
     entity,
-    `${reason ? `<p role="alert">${escapeHtml(reason)}</p>` : ""}
-     <form method="post" action="/p/${encodeURIComponent(module.projectCode)}/${encodeURIComponent(entity.name)}">
+    `${reason ? `<p role="alert" data-testid="${escapeHtml(stable("error"))}">${escapeHtml(reason)}</p>` : ""}
+     <form method="post" action="/p/${encodeURIComponent(module.projectCode)}/${encodeURIComponent(entity.name)}" data-testid="${escapeHtml(stable("form"))}">
        ${inputs}
-       <button type="submit">保存</button>
+       <button type="submit" data-testid="${escapeHtml(stable("submit"))}">保存</button>
      </form>`,
   );
 }
 
-function listPage(module, entity, records) {
+function listPage(module, entity, records, created = false) {
+  const stable = (suffix) => `${module.projectCode}/${entity.name}/${suffix}`;
   const rows = records
     .map((record) => {
       const cells = entity.fields
@@ -512,9 +552,35 @@ function listPage(module, entity, records) {
   return pageShell(
     module,
     entity,
-    `<p><a href="/p/${encodeURIComponent(module.projectCode)}/${encodeURIComponent(entity.name)}/form">新增</a></p>
-     <table border="1" cellpadding="6"><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table>`,
+    `${created ? `<p role="status" data-testid="${escapeHtml(stable("created"))}">保存成功</p>` : ""}
+     <p><a data-testid="${escapeHtml(stable("new"))}" href="/p/${encodeURIComponent(module.projectCode)}/${encodeURIComponent(entity.name)}/form">新增</a></p>
+     <table border="1" cellpadding="6" data-testid="${escapeHtml(stable("list"))}"><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table>`,
   );
+}
+
+function workflowListPage(module) {
+  const items = module.workflows
+    .map(
+      (workflow) =>
+        `<li><a href="/p/${encodeURIComponent(module.projectCode)}/workflows/${encodeURIComponent(workflow.name)}">${escapeHtml(workflow.name)}</a></li>`,
+    )
+    .join("");
+  return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>流程</title><body><h1>流程</h1><ul>${items}</ul></body></html>`;
+}
+
+function workflowPage(module, workflow, position) {
+  const buttons = workflow.steps
+    .map((step, index) => {
+      const testId = `${module.projectCode}/${workflow.name}/${step}`;
+      const state = index < position ? "已完成" : index === position ? "当前" : "未开始";
+      const disabled = index === position ? "" : " disabled";
+      return `<form method="post" action="/p/${encodeURIComponent(module.projectCode)}/workflows/${encodeURIComponent(workflow.name)}/${encodeURIComponent(step)}">
+        <button type="submit"${disabled} data-testid="${escapeHtml(testId)}">${escapeHtml(step)}（${state}）</button>
+      </form>`;
+    })
+    .join("");
+  return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>${escapeHtml(workflow.name)}</title>
+<body><h1>${escapeHtml(workflow.name)}</h1>${buttons}</body></html>`;
 }
 
 function pageShell(module, entity, body) {

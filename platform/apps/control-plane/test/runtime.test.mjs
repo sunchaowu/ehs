@@ -138,7 +138,16 @@ describe("standard module runtime", () => {
 
     const form = await fetch(`${base}/p/qing-jia-shen-pi/请假单/form`);
     expect(form.status).toBe(200);
-    expect(await form.text()).toContain('name="开始日期"');
+    const formHtml = await form.text();
+    expect(formHtml).toContain('name="开始日期"');
+    // 稳定标识与黑盒步骤 target 完全一致，供 Playwright 优先定位。
+    expect(formHtml).toContain('data-testid="qing-jia-shen-pi/请假单/form"');
+    expect(formHtml).toContain('data-testid="qing-jia-shen-pi/请假单/开始日期"');
+    expect(formHtml).toContain('data-testid="qing-jia-shen-pi/请假单/submit"');
+
+    const workflowPage = await fetch(`${base}/p/qing-jia-shen-pi/workflows/请假`);
+    expect(workflowPage.status).toBe(200);
+    expect(await workflowPage.text()).toContain('data-testid="qing-jia-shen-pi/请假/submit"');
 
     const submitted = await fetch(`${base}/p/qing-jia-shen-pi/请假单`, {
       method: "POST",
@@ -169,6 +178,21 @@ describe("standard module runtime", () => {
     const dockerfile = imageDockerfile();
     expect(dockerfile).toContain("COPY node_modules ./node_modules");
     expect(dockerfile).toContain('CMD ["node", "node_modules/@platform/runtime/server.mjs"]');
+    // 黑盒执行器需要浏览器与 Midscene/Playwright，并固定定位路径。
+    expect(dockerfile).toContain("chromium");
+    expect(dockerfile).toContain("playwright @playwright/test @midscene/web");
+    expect(dockerfile).toContain("PLATFORM_BROWSER_MODULE=/opt/test-harness/node_modules/playwright/index.mjs");
+    expect(dockerfile).toContain("PLATFORM_MIDSCENE_MODULE=/opt/test-harness/node_modules/@midscene/web/dist/es/playwright/index.mjs");
+    expect(dockerfile).toContain("MIDSCENE_MODEL_PROTOCOL=openai-chat");
+    expect(dockerfile).toContain("MIDSCENE_MODEL_FAMILY=qwen2.5-vl");
+    // 多行 RUN 必须以反斜杠续行，否则 Docker 会把后续行当成独立指令而构建失败。
+    const aptRun = dockerfile.match(/RUN apt-get update[\s\S]*?lists\/\*/)?.[0] ?? "";
+    expect(aptRun).toContain("recommends \\");
+    expect(aptRun).toContain("libatk-bridge2.0-0 \\");
+    expect(aptRun).toContain("xdg-utils \\");
+    const harnessRun = dockerfile.match(/RUN mkdir -p \/opt\/test-harness[\s\S]*?@midscene\/web/)?.[0] ?? "";
+    expect(harnessRun).toContain("cd /opt/test-harness \\");
+    expect(harnessRun).toContain("npm init -y >/dev/null 2>&1 \\");
   });
 
   it("copies pg and its dependencies into the image", async () => {
