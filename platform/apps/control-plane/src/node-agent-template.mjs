@@ -401,6 +401,7 @@ export async function runTestJob(job, options = {}) {
       JSON.stringify({
         cases: job.cases ?? [],
         stepTimeoutSeconds: job.stepTimeoutSeconds,
+        runTimeoutSeconds: job.runTimeoutSeconds,
         // 黑盒视觉定位用的模型配置随载荷下发；密钥只进容器临时文件，不写日志。
         modelBaseUrl: job.modelBaseUrl ?? "",
         modelName: job.modelName ?? "",

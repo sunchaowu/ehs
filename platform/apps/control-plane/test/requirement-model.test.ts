@@ -1,8 +1,12 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// 串行全套时容器负载会让该用例逼近默认 5 秒超时。
+vi.setConfig({ testTimeout: 15_000 });
 import { openDatabase } from "../src/database.js";
 import { installInitialAdmin } from "../src/install-admin.js";
 import { buildServer } from "../src/server.js";
 import type { ChatMessage, ModelClient } from "../src/llm.js";
+import { defaultSystemConfig } from "../src/system-config.js";
 
 const input = {
   title: "企业应用平台",
@@ -26,7 +30,13 @@ describe("requirement session calls the model", () => {
     await database.query("delete from sessions");
     await database.query("delete from users");
     await database.query("delete from projects");
-    const initialConfig = await database.readConfig();
+    const initialConfig = defaultSystemConfig({
+      title: input.title,
+      systemUrl: databaseUrl!,
+      prodAdminUrl: input.prodAdminUrl,
+      testAdminUrl: input.testAdminUrl,
+      registryAddress: input.registryAddress,
+    });
     await database.saveConfig({ ...initialConfig, "model.baseUrl": "", "model.name": "", "model.apiKey": "" });
     await database.close();
     const installed = await installInitialAdmin(databaseUrl!, input);
@@ -97,7 +107,13 @@ describe("requirement session calls the model", () => {
     await database.query("delete from sessions");
     await database.query("delete from users");
     await database.query("delete from projects");
-    const initialConfig = await database.readConfig();
+    const initialConfig = defaultSystemConfig({
+      title: input.title,
+      systemUrl: databaseUrl!,
+      prodAdminUrl: input.prodAdminUrl,
+      testAdminUrl: input.testAdminUrl,
+      registryAddress: input.registryAddress,
+    });
     await database.saveConfig({ ...initialConfig, "model.baseUrl": "", "model.name": "", "model.apiKey": "" });
     await database.close();
     const installed = await installInitialAdmin(databaseUrl!, input);

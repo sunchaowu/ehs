@@ -1551,11 +1551,21 @@ function CreateProjectPage(props: { onCreated: (project: { name: string; code: s
   );
 }
 
+type TestCaseStepView = {
+  index: number;
+  action: string;
+  target: string;
+  value?: string | number | boolean;
+  expected: string;
+  dependsOn?: string;
+};
+
 type TestCaseView = {
   origin: string;
   method: string;
   code: string;
   name: string;
+  steps?: TestCaseStepView[];
 };
 
 type TestRunView = {
@@ -1604,6 +1614,131 @@ type TestsView = {
 const methodLabel = (method: string) => (method === "black-box" ? "黑盒" : "白盒");
 const shortDigest = (digest: string) => digest.replace(/^sha256:/, "").slice(0, 12);
 const formatTime = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12: false });
+
+type UserCaseStepForm = { action: string; target: string; value: string; expected: string };
+
+function UserCasesCard(props: { projectCode: string; canEdit: boolean }) {
+  const [cases, setCases] = useState<TestCaseView[]>([]);
+  const [loadError, setLoadError] = useState("");
+  const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [method, setMethod] = useState("white-box");
+  const [name, setName] = useState("");
+  const [steps, setSteps] = useState<UserCaseStepForm[]>([{ action: "call", target: "", value: "", expected: "" }]);
+  const load = () => {
+    void fetch(`/api/projects/${encodeURIComponent(props.projectCode)}/tests/cases`)
+      .then(async (response) => {
+        const body = (await response.json()) as { cases?: TestCaseView[]; reason?: string };
+        if (!response.ok) {
+          setLoadError(body.reason ?? "案例读取失败");
+          return;
+        }
+        setCases(body.cases ?? []);
+      })
+      .catch(() => setLoadError("案例读取失败"));
+  };
+  useEffect(load, [props.projectCode]);
+  const updateStep = (index: number, patch: Partial<UserCaseStepForm>) => {
+    setSteps((current) => current.map((step, position) => (position === index ? { ...step, ...patch } : step)));
+  };
+  const submit = async () => {
+    setFeedback(null);
+    setBusy(true);
+    const body = {
+      method,
+      name,
+      steps: steps.map((step) => ({
+        action: step.action.trim(),
+        target: step.target.trim(),
+        expected: step.expected.trim(),
+        ...(step.value !== "" ? { value: step.value } : {}),
+      })),
+    };
+    const response = await fetch(`/api/projects/${encodeURIComponent(props.projectCode)}/tests/cases`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = (await response.json().catch(() => ({}))) as { reason?: string };
+    setBusy(false);
+    if (!response.ok) {
+      setFeedback({ type: "error", message: payload.reason ?? "案例新增失败" });
+      return;
+    }
+    setFeedback({ type: "success", message: `案例「${name}」已新增` });
+    setName("");
+    setSteps([{ action: "call", target: "", value: "", expected: "" }]);
+    load();
+  };
+  const remove = (code: string) => {
+    setFeedback(null);
+    void fetch(`/api/projects/${encodeURIComponent(props.projectCode)}/tests/cases/${encodeURIComponent(code)}`, { method: "DELETE" })
+      .then(async (response) => {
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => ({}))) as { reason?: string };
+          setFeedback({ type: "error", message: payload.reason ?? "案例删除失败" });
+          return;
+        }
+        setFeedback({ type: "success", message: "案例已删除" });
+        load();
+      })
+      .catch(() => setFeedback({ type: "error", message: "案例删除失败" }));
+  };
+  return (
+    <Card data-testid="platform/user-cases/page" title="用户测试案例" style={{ marginBottom: 16 }}>
+      <Typography.Paragraph type="secondary">
+        手工追加的案例按方法与步骤稳定编码，方案确认后仍保留。黑盒步骤需要执行器，当前环境将记为失败。
+      </Typography.Paragraph>
+      {loadError ? <Alert type="error" showIcon message={loadError} style={{ marginBottom: 16 }} /> : null}
+      {feedback ? (
+        <Alert data-testid="platform/user-cases/feedback" type={feedback.type} showIcon message={feedback.message} style={{ marginBottom: 16 }} />
+      ) : null}
+      <List
+        dataSource={cases}
+        locale={{ emptyText: "尚无用户案例" }}
+        style={{ marginBottom: 16 }}
+        renderItem={(item) => (
+          <List.Item
+            data-testid={`platform/user-cases/row-${item.code}`}
+            actions={props.canEdit ? [<Button key="remove" size="small" danger data-testid={`platform/user-cases/remove-${item.code}`} onClick={() => remove(item.code)}>删除</Button>] : undefined}
+          >
+            <List.Item.Meta
+              title={<span>{item.name} <Tag data-testid={`platform/user-cases/method-${item.code}`}>{methodLabel(item.method)}</Tag></span>}
+              description={`${item.steps?.length ?? 0} 个步骤 · ${item.code}`}
+            />
+          </List.Item>
+        )}
+      />
+      {props.canEdit ? (
+        <div data-testid="platform/user-cases/form">
+          <Space wrap style={{ marginBottom: 12 }}>
+            <Select
+              data-testid="platform/user-cases/method"
+              value={method}
+              onChange={setMethod}
+              style={{ width: 120 }}
+              options={[{ value: "white-box", label: "白盒" }, { value: "black-box", label: "黑盒" }]}
+            />
+            <Input data-testid="platform/user-cases/name" value={name} onChange={(event) => setName(event.target.value)} placeholder="案例名称" style={{ width: 220 }} />
+          </Space>
+          {steps.map((step, index) => (
+            <Space wrap key={index} style={{ display: "flex", marginBottom: 8 }} data-testid={`platform/user-cases/step-${index}`}>
+              <Input data-testid={`platform/user-cases/step-action-${index}`} value={step.action} onChange={(event) => updateStep(index, { action: event.target.value })} placeholder="action" style={{ width: 96 }} />
+              <Input data-testid={`platform/user-cases/step-target-${index}`} value={step.target} onChange={(event) => updateStep(index, { target: event.target.value })} placeholder="target，例如 qing-jia-shen-pi/请假单.create" style={{ width: 300 }} />
+              <Input data-testid={`platform/user-cases/step-value-${index}`} value={step.value} onChange={(event) => updateStep(index, { value: event.target.value })} placeholder="value（可选）" style={{ width: 120 }} />
+              <Input data-testid={`platform/user-cases/step-expected-${index}`} value={step.expected} onChange={(event) => updateStep(index, { expected: event.target.value })} placeholder="expected" style={{ width: 160 }} />
+              <Button size="small" data-testid={`platform/user-cases/step-remove-${index}`} disabled={steps.length === 1} onClick={() => setSteps((current) => current.filter((_, position) => position !== index))}>移除步骤</Button>
+            </Space>
+          ))}
+          <Space wrap>
+            <Button size="small" data-testid="platform/user-cases/step-add" onClick={() => setSteps((current) => [...current, { action: "call", target: "", value: "", expected: "" }])}>添加步骤</Button>
+            <Button type="primary" data-testid="platform/user-cases/add" loading={busy} onClick={() => void submit()}>新增案例</Button>
+          </Space>
+        </div>
+      ) : null}
+    </Card>
+  );
+}
 
 function TestResultsCard(props: { projectCode: string }) {
   const [tests, setTests] = useState<TestsView | null>(null);
@@ -1935,6 +2070,8 @@ function ProjectPage(props: { project: { name: string; code: string }; modelConf
   const [reason, setReason] = useState("");
   const [templateState, setTemplateState] = useState("");
   const [release, setRelease] = useState<ReleaseView | null>(null);
+  const [publishing, setPublishing] = useState(false);
+  const [publishError, setPublishError] = useState("");
   const [view, setView] = useState<"draft" | "confirm" | "access">("draft");
   const [messages, setMessages] = useState<Array<{ role: string; body: string }>>([]);
   const [sending, setSending] = useState(false);
@@ -1955,6 +2092,30 @@ function ProjectPage(props: { project: { name: string; code: string }; modelConf
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.project.code]);
   const waiting = (release?.nodes ?? []).filter((node) => !node.healthy).map((node) => `${node.name}：${node.reason ?? "尚未报告"}`);
+  // 门槛关闭（required===false）时不拦截；门槛开启时只有存在全部通过的候选才允许发布。
+  const gateRequired = release?.testResult?.required !== false;
+  const testsPassed = release?.testResult?.passed === true;
+  const publishBlocked = gateRequired && !testsPassed;
+  const publishBlockReason = !gateRequired
+    ? ""
+    : release?.testResult?.failedCases && release.testResult.failedCases.length > 0
+      ? `当前候选测试未全部通过：${release.testResult.failedCases.join("、")}`
+      : "当前候选尚无全部通过的测试记录";
+  const confirmPublish = async () => {
+    setPublishing(true);
+    setPublishError("");
+    const response = await fetch(`/api/projects/${encodeURIComponent(props.project.code)}/publish`, { method: "POST" });
+    const body = (await response.json().catch(() => ({}))) as { reason?: string; failedCases?: string[] };
+    setPublishing(false);
+    if (!response.ok) {
+      setPublishError(body.failedCases?.length ? `${body.reason ?? "发布失败"}：${body.failedCases.join("、")}` : body.reason ?? "发布失败");
+      return;
+    }
+    const next = await fetch(`/api/projects/${encodeURIComponent(props.project.code)}/release`);
+    if (next.ok) {
+      setRelease((await next.json()) as ReleaseView);
+    }
+  };
   if (view === "confirm") {
     return <SolutionConfirmPage project={props.project} onBack={() => setView("draft")} />;
   }
@@ -2041,6 +2202,21 @@ function ProjectPage(props: { project: { name: string; code: string }; modelConf
               {release.testResult?.failedCases && release.testResult.failedCases.length > 0 ? (
                 <Typography.Paragraph data-testid="platform/project/failed-cases">失败案例 {release.testResult.failedCases.join("、")}</Typography.Paragraph>
               ) : null}
+              {publishError ? <Alert type="error" showIcon message={publishError} style={{ marginBottom: 8 }} /> : null}
+              <Button
+                type="primary"
+                data-testid="platform/project/publish"
+                loading={publishing}
+                disabled={publishBlocked || Boolean(release.reason)}
+                title={publishBlocked ? publishBlockReason : undefined}
+                style={{ marginBottom: 8 }}
+                onClick={() => void confirmPublish()}
+              >
+                确认发布
+              </Button>
+              {publishBlocked ? (
+                <Typography.Paragraph type="warning" data-testid="platform/project/publish-blocked">{publishBlockReason}</Typography.Paragraph>
+              ) : null}
               {waiting.length > 0 ? <Alert type="info" showIcon message={waiting.join("；")} /> : null}
               {!release.published && waiting.length === 0 && !release.reason ? <Alert type="info" showIcon message="目标节点尚未报告健康" /> : null}
             </div>
@@ -2100,6 +2276,7 @@ function ProjectPage(props: { project: { name: string; code: string }; modelConf
           </Form>
         </Card>
       </div>
+      <UserCasesCard projectCode={props.project.code} canEdit />
       <TestResultsCard projectCode={props.project.code} />
     </div>
   );

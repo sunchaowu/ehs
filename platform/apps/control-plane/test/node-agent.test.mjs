@@ -139,8 +139,12 @@ describe("test node agent", () => {
     await writeFile(join(directory, "test-runner.mjs"), "// runner", "utf8");
     const calls = [];
     const reports = [];
+    let runnerPayload;
     const docker = async (args) => {
       calls.push(args);
+      if (args[0] === "cp" && typeof args[1] === "string" && args[1].includes("test-payload-")) {
+        runnerPayload = JSON.parse(await readFile(args[1], "utf8"));
+      }
       if (args[0] === "exec" && args[1] === "platform-test-job01" && args[2] === "node") {
         return { code: 0, stdout: JSON.stringify({ storage: "postgres" }), stderr: "" };
       }
@@ -167,6 +171,9 @@ describe("test node agent", () => {
         cases: [],
         stepTimeoutSeconds: 10,
         runTimeoutSeconds: 600,
+        modelBaseUrl: "http://model.internal/v1",
+        modelName: "doubao-vision",
+        modelApiKey: "sk-test-key",
       },
       { docker, request, nodeDir: directory },
     );
@@ -175,6 +182,13 @@ describe("test node agent", () => {
     expect(run).toContain("DATABASE_URL=postgres://platform:pw@db:5432/tst_qing_jia");
     expect(calls.some((args) => args[0] === "cp" && args[2].endsWith(":/tmp/platform-test-runner.mjs"))).toBe(true);
     expect(calls.some((args) => args[0] === "cp" && args[2].endsWith(":/tmp/platform-test-payload.json"))).toBe(true);
+    expect(runnerPayload).toMatchObject({
+      stepTimeoutSeconds: 10,
+      runTimeoutSeconds: 600,
+      modelBaseUrl: "http://model.internal/v1",
+      modelName: "doubao-vision",
+      modelApiKey: "sk-test-key",
+    });
     const terminal = reports.find((item) => item.path === "/api/nodes/test-1/tests/job-01");
     expect(terminal.body.outcomes[0].passed).toBe(true);
     expect(terminal.body.log).toContain("执行测试");

@@ -427,6 +427,111 @@ describe("portal shell", () => {
     vi.unstubAllGlobals();
   });
 
+  it("adds and removes user test cases from the project page", async () => {
+    const requests: Array<{ url: string; method?: string; body?: string }> = [];
+    let cases: Array<{ origin: string; method: string; code: string; name: string; steps: unknown[] }> = [
+      { origin: "user", method: "white-box", code: "case-existing", name: "已有案例", steps: [] },
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
+        const target = String(url);
+        requests.push({ url: target, method: init?.method, body: init?.body });
+        if (target.endsWith("/tests/cases") && !init?.method) {
+          return { ok: true, json: async () => ({ cases }) };
+        }
+        if (target.endsWith("/tests/cases") && init?.method === "POST") {
+          const payload = JSON.parse(init.body ?? "{}") as { name: string };
+          cases = [...cases, { origin: "user", method: "white-box", code: "case-new", name: payload.name, steps: [] }];
+          return { ok: true, json: async () => ({ testCase: { code: "case-new" } }) };
+        }
+        if (target.includes("/tests/cases/") && init?.method === "DELETE") {
+          const code = decodeURIComponent(target.split("/tests/cases/")[1]);
+          cases = cases.filter((item) => item.code !== code);
+          return { ok: true, json: async () => ({}) };
+        }
+        return { ok: true, json: async () => ({ project: { name: "请假审批", code: "qing-jia-shen-pi" } }) };
+      }),
+    );
+    render(<App session={admin} title="企业应用平台" />);
+    fireEvent.click(screen.getByTestId("platform/project/new"));
+    fireEvent.change(screen.getByTestId("platform/project/name"), { target: { value: "请假审批" } });
+    fireEvent.click(screen.getByTestId("platform/project/save"));
+
+    expect(await screen.findByTestId("platform/user-cases/page")).toBeInTheDocument();
+    expect(await screen.findByTestId("platform/user-cases/row-case-existing")).toHaveTextContent("已有案例");
+    expect(screen.getByTestId("platform/user-cases/method-case-existing")).toHaveTextContent("白盒");
+
+    fireEvent.change(screen.getByTestId("platform/user-cases/name"), { target: { value: "新增案例" } });
+    fireEvent.change(screen.getByTestId("platform/user-cases/step-target-0"), { target: { value: "qing-jia-shen-pi/请假单.create" } });
+    fireEvent.click(screen.getByTestId("platform/user-cases/add"));
+    expect(await screen.findByTestId("platform/user-cases/row-case-new")).toHaveTextContent("新增案例");
+    await vi.waitFor(() => {
+      const call = requests.find((item) => item.url.endsWith("/tests/cases") && item.method === "POST");
+      expect(call).toBeTruthy();
+      const body = JSON.parse(call!.body ?? "{}") as { name: string; method: string; steps: Array<{ target: string }> };
+      expect(body).toMatchObject({ name: "新增案例", method: "white-box" });
+      expect(body.steps[0].target).toBe("qing-jia-shen-pi/请假单.create");
+    });
+
+    fireEvent.click(screen.getByTestId("platform/user-cases/remove-case-new"));
+    await vi.waitFor(() => {
+      expect(screen.queryByTestId("platform/user-cases/row-case-new")).toBeNull();
+    });
+    expect(requests.some((item) => item.url.includes("/tests/cases/case-new") && item.method === "DELETE")).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it("blocks publishing until the current candidate passes all tests", async () => {
+    const requests: Array<{ url: string; method?: string }> = [];
+    let passed = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: { method?: string }) => {
+        const target = String(url);
+        requests.push({ url: target, method: init?.method });
+        if (target.endsWith("/publish") && init?.method === "POST") {
+          return { ok: true, json: async () => ({ published: true }) };
+        }
+        if (target.endsWith("/release")) {
+          return {
+            ok: true,
+            json: async () => ({
+              published: false,
+              nodes: [],
+              candidateDigest: "sha256:abc",
+              testResult: { required: true, passed, failedCases: passed ? [] : ["新增请假单"] },
+            }),
+          };
+        }
+        return { ok: true, json: async () => ({ project: { name: "请假审批", code: "qing-jia-shen-pi" } }) };
+      }),
+    );
+    render(<App session={admin} title="企业应用平台" />);
+    fireEvent.click(screen.getByTestId("platform/project/new"));
+    fireEvent.change(screen.getByTestId("platform/project/name"), { target: { value: "请假审批" } });
+    fireEvent.click(screen.getByTestId("platform/project/save"));
+    fireEvent.click(await screen.findByTestId("platform/project/release"));
+    const publishButton = await screen.findByTestId("platform/project/publish");
+    expect(publishButton).toBeDisabled();
+    expect(await screen.findByTestId("platform/project/publish-blocked")).toHaveTextContent("新增请假单");
+    fireEvent.click(publishButton);
+    expect(requests.some((item) => item.url.endsWith("/publish") && item.method === "POST")).toBe(false);
+
+    passed = true;
+    fireEvent.click(screen.getByTestId("platform/project/release"));
+    await vi.waitFor(() => {
+      expect(publishButton).not.toBeDisabled();
+    });
+    fireEvent.click(publishButton);
+    await vi.waitFor(() => {
+      expect(requests.some((item) => item.url.endsWith("/publish") && item.method === "POST")).toBe(true);
+      // 发布成功后会再次读取 release 刷新状态，等它完成后再还原 stub，避免 pending fetch 落到真实 fetch。
+      expect(requests.filter((item) => item.url.endsWith("/release")).length).toBeGreaterThanOrEqual(3);
+    });
+    vi.unstubAllGlobals();
+  });
+
   it("renders system, plugin, model, and personal settings", () => {
     const config = {
       "platform.title": "企业应用平台",

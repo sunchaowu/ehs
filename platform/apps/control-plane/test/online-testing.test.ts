@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.setConfig({ testTimeout: 30_000 });
 import { openDatabase } from "../src/database.js";
 import { installInitialAdmin } from "../src/install-admin.js";
+import { claimTestJobs } from "../src/node-tests.js";
 import { buildServer } from "../src/server.js";
 import type { TestExecutor } from "../src/test-executor.js";
 import { caseCode, generateAutomaticCases, normalizeUserCase } from "../src/test-cases.js";
@@ -396,6 +397,11 @@ describe("online testing", () => {
         "返回带 id 的记录",
       ],
     );
+    await seed.query(
+      `insert into system_config (key, value) values ('model.baseUrl', $1), ('model.name', $2), ('model.apiKey', $3)
+       on conflict (key) do update set value = excluded.value`,
+      ["http://model.internal/v1", "doubao-vision", "sk-test-key"],
+    );
     await seed.close();
 
     const replay = await app.inject({
@@ -411,11 +417,26 @@ describe("online testing", () => {
       id: string;
       replayed_from: string | null;
       replayed_from_digest: string | null;
+      model_base_url: string;
+      model_name: string;
+      model_api_key: string;
       cases: Array<{ code: string; name: string; method: string; steps: Array<{ index: number; target: string; expected?: string }> }>;
-    }>("select id, replayed_from, replayed_from_digest, cases from test_jobs where run_id = $1", [runId]);
+    }>("select id, replayed_from, replayed_from_digest, model_base_url, model_name, model_api_key, cases from test_jobs where run_id = $1", [runId]);
     expect(jobs.rows).toHaveLength(1);
     expect(jobs.rows[0].replayed_from).toBe(original.rows[0].id);
     expect(jobs.rows[0].replayed_from_digest).toBe(digest);
+    expect(jobs.rows[0]).toMatchObject({
+      model_base_url: "http://model.internal/v1",
+      model_name: "doubao-vision",
+      model_api_key: "sk-test-key",
+    });
+    const claimed = await claimTestJobs(queued, "test-1", 10);
+    const claimedJob = claimed.find((item) => item.id === jobs.rows[0].id);
+    expect(claimedJob).toMatchObject({
+      modelBaseUrl: "http://model.internal/v1",
+      modelName: "doubao-vision",
+      modelApiKey: "sk-test-key",
+    });
     const job = jobs.rows[0];
     await queued.close();
 

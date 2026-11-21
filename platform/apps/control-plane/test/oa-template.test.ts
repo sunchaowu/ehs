@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// 串行全套时容器负载会让该用例逼近默认 5 秒超时。
+vi.setConfig({ testTimeout: 15_000 });
 import { installInitialAdmin } from "../src/install-admin.js";
 import { openDatabase } from "../src/database.js";
 import { buildServer } from "../src/server.js";
