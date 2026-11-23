@@ -330,12 +330,26 @@ export async function runTestJob(job, options = {}) {
   const containerName = "platform-test-" + String(job.id).replace(/[^a-z0-9]/gi, "").slice(0, 12);
   const payloadPath = directory + "/test-payload-" + containerName + ".json";
   const runnerPath = directory + "/test-runner.mjs";
+  // 实时日志片段：尽力回报，失败不重试也不影响测试执行。
+  const note = async function (message) {
+    try {
+      await requestFn("/api/nodes/" + nodeName() + "/tests/" + job.id, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ log: "[" + new Date().toISOString() + "] " + message + "\n" }),
+      });
+    } catch {
+      // 日志回报失败只损失可观测性，不损失测试结果。
+    }
+  };
   try {
+    await note("开始测试任务，拉取候选镜像 " + job.imageDigest);
     const pulled = await dockerFn(["pull", job.imageDigest]);
     if (pulled.code !== 0) {
       await reportTestJob(job.id, { reason: (pulled.stderr || pulled.stdout || "镜像拉取失败").trim() }, requestFn);
       return;
     }
+    await note("候选镜像拉取完成");
     await dockerFn(["rm", "-f", containerName]);
     const args = ["run", "-d", "--name", containerName, "-e", "DATABASE_NAME=" + job.databaseName, "-e", "runtime.mode=test"];
     const url = databaseUrl(job.databaseName);
@@ -348,11 +362,13 @@ export async function runTestJob(job, options = {}) {
       await reportTestJob(job.id, { reason: (started.stderr || started.stdout || "测试容器启动失败").trim() }, requestFn);
       return;
     }
+    await note("测试容器已启动 " + containerName);
     const health = await containerHealth(containerName, dockerFn);
     if (!health) {
       await reportTestJob(job.id, { reason: "测试容器健康检查未返回结果" }, requestFn);
       return;
     }
+    await note("测试容器健康检查通过");
     writeFileSync(
       payloadPath,
       JSON.stringify({
@@ -375,10 +391,15 @@ export async function runTestJob(job, options = {}) {
       await reportTestJob(job.id, { reason: (copiedPayload.stderr || "无法复制测试用例").trim() }, requestFn);
       return;
     }
+    await note("测试入口与用例载荷已注入，开始执行");
     const executed = await dockerFn(
       ["exec", "-e", "PLATFORM_TEST_PAYLOAD_FILE=/tmp/platform-test-payload.json", containerName, "node", "/tmp/platform-test-runner.mjs"],
       { timeoutMs: Math.max(60000, Number(job.runTimeoutSeconds ?? 900) * 1000) },
     );
+    await note("白盒入口执行结束，退出码 " + executed.code);
+    if (executed.stderr && String(executed.stderr).trim()) {
+      await note("执行 stderr：" + String(executed.stderr).trim().slice(-2000));
+    }
     const parsed = lastJsonLine(executed.stdout);
     if (!parsed) {
       await reportTestJob(job.id, { reason: (executed.stderr || executed.stdout || "白盒测试入口没有返回结果").trim() }, requestFn);

@@ -199,7 +199,14 @@ describe("test node agent", () => {
       modelApiKey: "sk-test-key",
     });
     expect(reports[0].path).toBe("/api/nodes/test-1/tests/job-01");
-    expect(reports[0].body.outcomes[0].passed).toBe(true);
+    const final = reports.find((report) => report.body.outcomes);
+    expect(final.body.outcomes[0].passed).toBe(true);
+    // 执行各阶段实时回报日志片段，且日志回报不带终态字段。
+    const logs = reports.filter((report) => typeof report.body.log === "string");
+    expect(logs.length).toBeGreaterThanOrEqual(4);
+    expect(logs.every((report) => report.body.outcomes === undefined && report.body.reason === undefined)).toBe(true);
+    expect(logs.map((report) => report.body.log).join("")).toContain("候选镜像拉取完成");
+    expect(logs.map((report) => report.body.log).join("")).toContain("白盒入口执行结束");
     expect(calls.filter((args) => args[0] === "rm" && args[1] === "-f").length).toBeGreaterThanOrEqual(2);
   });
 
@@ -230,7 +237,7 @@ describe("test node agent", () => {
       },
     );
     expect(calls.some((args) => args[0] === "run")).toBe(false);
-    expect(reports[0].body.reason).toContain("manifest unknown");
+    expect(reports.find((report) => report.body.reason).body.reason).toContain("manifest unknown");
   });
 
   it("reports project health from the runtime storage flag", async () => {

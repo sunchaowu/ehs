@@ -1598,6 +1598,18 @@ type TestsView = {
   runs: TestRunView[];
 };
 
+type TestJobView = {
+  id: string;
+  nodeName: string;
+  status: string;
+  attempt: number;
+  failure: string;
+  log: string;
+  createdAt: string;
+  claimedAt: string | null;
+  finishedAt: string | null;
+};
+
 const methodLabel = (method: string) => (method === "black-box" ? "黑盒" : "白盒");
 const shortDigest = (digest: string) => digest.replace(/^sha256:/, "").slice(0, 12);
 const formatTime = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12: false });
@@ -1732,6 +1744,8 @@ function TestResultsCard(props: { projectCode: string }) {
   const [steps, setSteps] = useState<TestStepView[]>([]);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
+  const [jobs, setJobs] = useState<TestJobView[] | null>(null);
+  const [jobsRunId, setJobsRunId] = useState("");
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -1807,6 +1821,27 @@ function TestResultsCard(props: { projectCode: string }) {
     }
   };
 
+  /** 展开/收起一次运行的节点任务日志；再点同一次运行则收起。 */
+  const toggleJobs = async (runId: string) => {
+    if (jobsRunId === runId) {
+      setJobsRunId("");
+      setJobs(null);
+      return;
+    }
+    try {
+      const response = await fetch(`/api/projects/${props.projectCode}/tests/runs/${runId}/jobs`);
+      const body = (await response.json()) as { jobs?: TestJobView[]; reason?: string };
+      if (!response.ok) {
+        setReason(body.reason ?? "任务日志读取失败");
+        return;
+      }
+      setJobs(Array.isArray(body.jobs) ? body.jobs : []);
+      setJobsRunId(runId);
+    } catch {
+      setReason("任务日志读取失败");
+    }
+  };
+
   useEffect(() => {
     void loadTests();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1865,6 +1900,13 @@ function TestResultsCard(props: { projectCode: string }) {
               data-testid={`platform/test-results/run-${run.id}`}
               actions={[
                 <Button
+                  key="jobs"
+                  data-testid={`platform/test-results/jobs-${run.id}`}
+                  onClick={() => void toggleJobs(run.id)}
+                >
+                  {jobsRunId === run.id ? "收起日志" : "任务日志"}
+                </Button>,
+                <Button
                   key="replay"
                   data-testid={`platform/test-results/replay-${run.id}`}
                   onClick={() => void callAndReload(`/api/projects/${props.projectCode}/tests/runs/${run.id}/replay`)}
@@ -1888,6 +1930,34 @@ function TestResultsCard(props: { projectCode: string }) {
             </List.Item>
           )}
         />
+      ) : null}
+      {jobs && jobsRunId ? (
+        <div data-testid="platform/test-results/jobs" style={{ marginTop: 12 }}>
+          <Typography.Text strong>节点任务与实时日志</Typography.Text>
+          {jobs.length === 0 ? (
+            <Empty data-testid="platform/test-results/jobs-empty" style={{ marginTop: 8 }} description="这次运行没有节点任务（同步执行）" />
+          ) : (
+            jobs.map((job) => (
+              <div key={job.id} data-testid={`platform/test-results/job-${job.id}`} style={{ marginTop: 8 }}>
+                <Space wrap>
+                  <Tag>{job.nodeName}</Tag>
+                  <Tag color={job.status === "done" ? (job.failure ? "red" : "green") : "blue"}>
+                    {job.status === "done" ? (job.failure ? "失败" : "完成") : job.status === "running" ? "执行中" : "等待领取"}
+                  </Tag>
+                  <Typography.Text type="secondary">领取次数 {job.attempt}</Typography.Text>
+                  {job.claimedAt ? <Typography.Text type="secondary">领取于 {formatTime(job.claimedAt)}</Typography.Text> : null}
+                </Space>
+                {job.failure ? <Typography.Paragraph type="danger" style={{ marginBottom: 4 }}>{job.failure}</Typography.Paragraph> : null}
+                <pre
+                  data-testid={`platform/test-results/job-log-${job.id}`}
+                  style={{ margin: 0, padding: 8, background: "rgba(0,0,0,0.04)", maxHeight: 240, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all" }}
+                >
+                  {job.log || "还没有日志"}
+                </pre>
+              </div>
+            ))
+          )}
+        </div>
       ) : null}
       {caseRows.length > 0 ? (
         <List

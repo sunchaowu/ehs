@@ -23,6 +23,7 @@ export type NodeTestJob = {
   modelBaseUrl: string;
   modelName: string;
   modelApiKey: string;
+  attempt: number;
 };
 
 type StoredJobRow = {
@@ -41,6 +42,8 @@ type StoredJobRow = {
   model_base_url: string;
   model_name: string;
   model_api_key: string;
+  attempt: number;
+  log: string;
 };
 
 export type NodeTestDispatch =
@@ -124,7 +127,7 @@ export async function claimTestJobs(database: SystemDatabase, nodeName: string, 
   await expireStaleTestJobs(database);
   const claimed = await database.query<StoredJobRow>(
     `update test_jobs
-     set status = 'running', claimed_at = now()
+     set status = 'running', claimed_at = now(), attempt = attempt + 1
      where id in (
        select id from test_jobs
        where node_name = $1 and status = 'pending'
@@ -133,7 +136,7 @@ export async function claimTestJobs(database: SystemDatabase, nodeName: string, 
        for update skip locked
      )
      returning id, run_id, node_name, project_code, image_digest, database_name, cases,
-               step_timeout_seconds, run_timeout_seconds, status, model_base_url, model_name, model_api_key`,
+               step_timeout_seconds, run_timeout_seconds, status, model_base_url, model_name, model_api_key, attempt`,
     [nodeName, limit],
   );
   return claimed.rows.map((row) => ({
@@ -148,7 +151,74 @@ export async function claimTestJobs(database: SystemDatabase, nodeName: string, 
     modelBaseUrl: row.model_base_url,
     modelName: row.model_name,
     modelApiKey: row.model_api_key,
+    attempt: row.attempt,
   }));
+}
+
+/** 单次日志片段与整条任务日志的上限，防止失控输出撑爆系统库。 */
+const JOB_LOG_CHUNK_LIMIT = 16_384;
+const JOB_LOG_TOTAL_LIMIT = 65_536;
+
+async function appendJobLog(database: SystemDatabase, jobId: string, chunk: string): Promise<void> {
+  if (!chunk) {
+    return;
+  }
+  await database.query(
+    `update test_jobs set log = right(log || $2, ${JOB_LOG_TOTAL_LIMIT}) where id = $1`,
+    [jobId, chunk.slice(0, JOB_LOG_CHUNK_LIMIT)],
+  );
+}
+
+export type NodeTestJobView = {
+  id: string;
+  nodeName: string;
+  status: string;
+  attempt: number;
+  failure: string;
+  log: string;
+  createdAt: string;
+  claimedAt: string | null;
+  finishedAt: string | null;
+};
+
+/** 门户排障视图：一次运行对应的节点任务、领取次数与实时日志。 */
+export async function listRunJobs(
+  database: SystemDatabase,
+  projectId: string,
+  runId: string,
+): Promise<{ jobs: NodeTestJobView[] } | { reason: string; status: number }> {
+  const run = await database.query<{ project_id: string }>("select project_id from test_runs where id = $1", [runId]);
+  if (!run.rows[0] || run.rows[0].project_id !== projectId) {
+    return { reason: "没有这条测试记录", status: 404 };
+  }
+  const jobs = await database.query<{
+    id: string;
+    node_name: string;
+    status: string;
+    attempt: number;
+    failure: string;
+    log: string;
+    created_at: Date;
+    claimed_at: Date | null;
+    finished_at: Date | null;
+  }>(
+    `select id, node_name, status, attempt, failure, log, created_at, claimed_at, finished_at
+     from test_jobs where run_id = $1 order by created_at`,
+    [runId],
+  );
+  return {
+    jobs: jobs.rows.map((row) => ({
+      id: row.id,
+      nodeName: row.node_name,
+      status: row.status,
+      attempt: row.attempt,
+      failure: row.failure,
+      log: row.log,
+      createdAt: row.created_at.toISOString(),
+      claimedAt: row.claimed_at ? row.claimed_at.toISOString() : null,
+      finishedAt: row.finished_at ? row.finished_at.toISOString() : null,
+    })),
+  };
 }
 
 export async function acceptTestJobReport(
@@ -156,7 +226,7 @@ export async function acceptTestJobReport(
   nodeName: string,
   authorization: string,
   jobId: string,
-  report: { outcomes?: unknown; reason?: unknown },
+  report: { outcomes?: unknown; reason?: unknown; log?: unknown },
 ): Promise<{ accepted: true } | { reason: string; status: number }> {
   const node = await authenticateNode(database, nodeName, authorization);
   if (!node) {
@@ -172,6 +242,13 @@ export async function acceptTestJobReport(
   }
   const failure = typeof report.reason === "string" ? report.reason.trim() : "";
   const outcomes = normalizeOutcomes(report.outcomes);
+  const logChunk = typeof report.log === "string" ? report.log : "";
+  // 只带日志的回报是执行中的实时片段：追加日志、不改任务状态。
+  if (!failure && !outcomes && logChunk) {
+    await appendJobLog(database, job.id, logChunk);
+    return { accepted: true };
+  }
+  await appendJobLog(database, job.id, logChunk);
   await database.query("update test_jobs set status = 'done', finished_at = now(), failure = $2 where id = $1", [
     job.id,
     failure,

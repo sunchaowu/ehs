@@ -10,7 +10,7 @@ import { assignNodePool, listNodes, poolsOverlap, prepareNodeInstall, registerNo
 import { type TestExecutor } from "./test-executor.js";
 import { createModelClient, type ModelClient } from "./llm.js";
 import { readTestOverview, readTestRunSteps, replayTestRun, runProjectTests } from "./test-runs.js";
-import { acceptTestJobReport, dispatchProjectTestRun, dispatchReplayTestRun } from "./node-tests.js";
+import { acceptTestJobReport, dispatchProjectTestRun, dispatchReplayTestRun, listRunJobs } from "./node-tests.js";
 import { addUserTestCase, deleteUserTestCase, listUserTestCases } from "./user-test-cases.js";
 import { createPluginRuntime } from "./plugin-runtime.js";
 import { acceptHealthReport, readDesiredWork, readProjectEntry, type ReportedProject } from "./releases.js";
@@ -988,7 +988,7 @@ export async function buildServer(options?: {
       return;
     }
     try {
-      const body = (request.body ?? {}) as { outcomes?: unknown; reason?: unknown };
+      const body = (request.body ?? {}) as { outcomes?: unknown; reason?: unknown; log?: unknown };
       const result = await acceptTestJobReport(
         database,
         (request.params as { name: string }).name,
@@ -1332,6 +1332,31 @@ export async function buildServer(options?: {
         return reply.code(project.status).send({ reason: project.reason });
       }
       const result = await readTestRunSteps(database, project.id, (request.params as { runId: string }).runId);
+      if ("reason" in result) {
+        return reply.code(result.status).send({ reason: result.reason });
+      }
+      return result;
+    } finally {
+      await database.close();
+    }
+  });
+
+  app.get("/api/projects/:code/tests/runs/:runId/jobs", async (request, reply) => {
+    const database = await requireDatabase(databaseUrl, reply);
+    if (!database) {
+      return;
+    }
+    try {
+      const actor = await readSession(database, request.cookies.platform_session);
+      if (!actor) {
+        return reply.code(401).send({ reason: "未登录" });
+      }
+      const projectCode = (request.params as { code: string }).code;
+      const project = await memberProject(database, actor, projectCode);
+      if ("reason" in project) {
+        return reply.code(project.status).send({ reason: project.reason });
+      }
+      const result = await listRunJobs(database, project.id, (request.params as { runId: string }).runId);
       if ("reason" in result) {
         return reply.code(result.status).send({ reason: result.reason });
       }

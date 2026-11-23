@@ -359,6 +359,83 @@ describe("portal shell", () => {
     vi.unstubAllGlobals();
   });
 
+  it("shows node job attempts and live logs for a test run", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const target = String(url);
+        if (target.endsWith("/tests/runs/run-1/jobs")) {
+          return {
+            ok: true,
+            json: async () => ({
+              jobs: [
+                {
+                  id: "job-1",
+                  nodeName: "test-1",
+                  status: "done",
+                  attempt: 1,
+                  failure: "测试容器启动失败",
+                  log: "[2026-11-23T08:00:00.000Z] 开始拉取镜像\n[2026-11-23T08:00:05.000Z] 镜像拉取完成\n",
+                  createdAt: "2026-11-23T07:59:59.000Z",
+                  claimedAt: "2026-11-23T08:00:00.000Z",
+                  finishedAt: "2026-11-23T08:00:06.000Z",
+                },
+              ],
+            }),
+          };
+        }
+        if (target.endsWith("/tests/runs/run-1")) {
+          return { ok: true, json: async () => ({ run: { id: "run-1" }, steps: [] }) };
+        }
+        if (target.endsWith("/tests")) {
+          return {
+            ok: true,
+            json: async () => ({
+              candidateDigest: "sha256:abcdef0123456789",
+              cases: [],
+              runs: [
+                {
+                  id: "run-1",
+                  imageDigest: "sha256:abcdef0123456789",
+                  status: "failed",
+                  failure: "测试容器启动失败",
+                  replayedFrom: null,
+                  replayedFromDigest: null,
+                  startedAt: "2026-11-23T08:00:00.000Z",
+                  finishedAt: "2026-11-23T08:00:06.000Z",
+                  failedCases: [],
+                },
+              ],
+            }),
+          };
+        }
+        if (target.endsWith("/release")) {
+          return { ok: true, json: async () => ({ published: false, nodes: [], candidateDigest: "sha256:abcdef0123456789", testResult: { passed: false, failedCases: [] } }) };
+        }
+        return { ok: true, json: async () => ({ project: { name: "请假审批", code: "leave" } }) };
+      }),
+    );
+    render(<App session={admin} title="企业应用平台" />);
+    fireEvent.click(screen.getByTestId("platform/project/new"));
+    fireEvent.change(screen.getByTestId("platform/project/name"), { target: { value: "请假审批" } });
+    fireEvent.click(screen.getByTestId("platform/project/save"));
+    expect(await screen.findByTestId("platform/test-results/card")).toBeInTheDocument();
+    fireEvent.click(await screen.findByTestId("platform/test-results/jobs-run-1"));
+    const log = await screen.findByTestId("platform/test-results/job-log-job-1");
+    expect(log).toHaveTextContent("开始拉取镜像");
+    expect(log).toHaveTextContent("镜像拉取完成");
+    const job = screen.getByTestId("platform/test-results/job-job-1");
+    expect(job).toHaveTextContent("test-1");
+    expect(job).toHaveTextContent("领取次数 1");
+    expect(job).toHaveTextContent("测试容器启动失败");
+    // 再点一次收起。
+    fireEvent.click(screen.getByTestId("platform/test-results/jobs-run-1"));
+    await vi.waitFor(() => {
+      expect(screen.queryByTestId("platform/test-results/jobs")).not.toBeInTheDocument();
+    });
+    vi.unstubAllGlobals();
+  });
+
   it("adds and removes user test cases from the project page", async () => {
     const requests: Array<{ url: string; method?: string; body?: string }> = [];
     let cases: Array<{ origin: string; method: string; code: string; name: string; steps: unknown[] }> = [

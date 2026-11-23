@@ -436,6 +436,7 @@ describe("online testing", () => {
       modelBaseUrl: "http://model.internal/v1",
       modelName: "doubao-vision",
       modelApiKey: "sk-test-key",
+      attempt: 1,
     });
     const job = jobs.rows[0];
     await queued.close();
@@ -473,5 +474,96 @@ describe("online testing", () => {
       status: "passed",
     });
     await verified.close();
+  }, 120000);
+
+  it("records job attempts and live logs for troubleshooting", async () => {
+    const databaseUrl = process.env.DATABASE_SYSTEM_URL!;
+    const installed = await installAdmin();
+    app = await buildServer({
+      databaseUrl,
+      imageBuilder: async () => ({ digest }),
+      databaseProvisioner: async () => ({ created: true }),
+    });
+    const cookie = await login(app, installed.password);
+    const code = await createProjectWithDesign(app, cookie, "请假审批");
+    const registered = await app.inject({
+      method: "POST",
+      url: "/api/nodes",
+      cookies: { platform_session: cookie },
+      payload: { name: "test-1", zone: "测试区" },
+    });
+    const token = registered.json().token as string;
+    await app.inject({
+      method: "PUT",
+      url: "/api/nodes/test-1/pool",
+      cookies: { platform_session: cookie },
+      payload: { pool: "test" },
+    });
+    const run = await app.inject({
+      method: "POST",
+      url: `/api/projects/${code}/tests`,
+      cookies: { platform_session: cookie },
+    });
+    expect(run.statusCode).toBe(202);
+    const runId = run.json().runId as string;
+    const queued = await openDatabase(databaseUrl);
+    const found = await queued.query<{ id: string }>("select id from test_jobs where run_id = $1", [runId]);
+    const jobId = found.rows[0].id;
+    await queued.close();
+    const report = (payload: Record<string, unknown>) =>
+      app!.inject({
+        method: "POST",
+        url: `/api/nodes/test-1/tests/${jobId}`,
+        headers: { authorization: `Bearer ${token}` },
+        payload,
+      });
+
+    // pending 期间的实时片段：只追加日志，不改任务状态。
+    expect((await report({ log: "开始拉取镜像\n" })).statusCode).toBe(200);
+    expect((await report({ log: "镜像拉取完成\n" })).statusCode).toBe(200);
+    const pending = await app.inject({
+      method: "GET",
+      url: `/api/projects/${code}/tests/runs/${runId}/jobs`,
+      cookies: { platform_session: cookie },
+    });
+    expect(pending.statusCode).toBe(200);
+    expect(pending.json().jobs[0]).toMatchObject({ id: jobId, nodeName: "test-1", status: "pending", attempt: 0 });
+    expect(pending.json().jobs[0].log).toBe("开始拉取镜像\n镜像拉取完成\n");
+
+    // 领取一次，attempt 计 1。
+    const claiming = await openDatabase(databaseUrl);
+    const claimed = await claimTestJobs(claiming, "test-1", 10);
+    await claiming.close();
+    expect(claimed.find((item) => item.id === jobId)?.attempt).toBe(1);
+
+    // 超长片段被截断，整条日志有上限。
+    expect((await report({ log: "x".repeat(40000) })).statusCode).toBe(200);
+    // 终态回报可携带最后一段日志。
+    expect((await report({ reason: "测试容器启动失败", log: "最后片段\n" })).statusCode).toBe(200);
+    // 已结束的任务拒绝任何后续回报。
+    expect((await report({ log: "迟到的片段" })).statusCode).toBe(409);
+
+    const settled = await app.inject({
+      method: "GET",
+      url: `/api/projects/${code}/tests/runs/${runId}/jobs`,
+      cookies: { platform_session: cookie },
+    });
+    const job = settled.json().jobs[0] as { status: string; attempt: number; failure: string; log: string; finishedAt: string | null };
+    expect(job).toMatchObject({ status: "done", attempt: 1, failure: "测试容器启动失败" });
+    expect(job.log).toContain("开始拉取镜像");
+    expect(job.log).toContain("最后片段");
+    expect(job.log.length).toBeLessThanOrEqual(65536);
+    expect(job.log).not.toContain("迟到的片段");
+    expect(job.finishedAt).toBeTruthy();
+
+    // 未登录 401；不存在的运行 404。
+    const anonymous = await app.inject({ method: "GET", url: `/api/projects/${code}/tests/runs/${runId}/jobs` });
+    expect(anonymous.statusCode).toBe(401);
+    const missing = await app.inject({
+      method: "GET",
+      url: `/api/projects/${code}/tests/runs/00000000-0000-4000-8000-000000000000/jobs`,
+      cookies: { platform_session: cookie },
+    });
+    expect(missing.statusCode).toBe(404);
   }, 120000);
 });
