@@ -32,6 +32,7 @@ describe("defaultSystemConfig", () => {
     expect(config["test.requirePassBeforePublish"]).toBe(true);
     expect(config["test.stepTimeoutSeconds"]).toBe(30);
     expect(config["test.runTimeoutSeconds"]).toBe(900);
+    expect(config["test.maxAttempts"]).toBe(2);
     expect(config["scheduler.defaultNodePool"]).toBe("");
   });
 });

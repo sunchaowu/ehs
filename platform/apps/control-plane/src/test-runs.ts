@@ -39,17 +39,31 @@ export type TestOverview = {
   runs: TestRunSummary[];
 };
 
-/** 节点失联或任务卡住时，按运行时限把测试任务和运行标记为失败。 */
+const TIMEOUT_FAILURE = "测试节点未在时限内回报";
+
+/** 节点失联或任务卡住时，按运行时限重试或把测试任务和运行标记为失败。 */
 export async function expireStaleTestJobs(database: SystemDatabase): Promise<void> {
+  // 还有重试次数的超时任务：按原优先级重新入队，不结束运行。
+  await database.query(
+    `update test_jobs
+     set status = 'pending', claimed_at = null, failure = '',
+         log = right(log || '[' || to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') || '] 第 ' || attempt || '/' || max_attempts || ' 次执行超时，已按优先级重新入队' || E'\\n', 65536)
+     where status = 'running' and claimed_at is not null
+       and claimed_at + make_interval(secs => run_timeout_seconds) < now()
+       and attempt < max_attempts`,
+  );
+  // 重试次数用尽：任务与运行标记失败。
   const stale = await database.query<{ run_id: string }>(
     `update test_jobs
-     set status = 'done', finished_at = now(), failure = '测试节点未在时限内回报'
+     set status = 'done', finished_at = now(), failure = $1,
+         log = right(log || '[' || to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') || '] 执行超时且重试次数用尽' || E'\\n', 65536)
      where status = 'running' and claimed_at is not null
        and claimed_at + make_interval(secs => run_timeout_seconds) < now()
      returning run_id`,
+    [TIMEOUT_FAILURE],
   );
   for (const row of stale.rows) {
-    await finishRun(database, row.run_id, "failed", "测试节点未在时限内回报");
+    await finishRun(database, row.run_id, "failed", TIMEOUT_FAILURE);
   }
 }
 

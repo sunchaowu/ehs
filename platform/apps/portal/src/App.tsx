@@ -1603,6 +1603,8 @@ type TestJobView = {
   nodeName: string;
   status: string;
   attempt: number;
+  maxAttempts: number;
+  priority: number;
   failure: string;
   log: string;
   createdAt: string;
@@ -1944,7 +1946,8 @@ function TestResultsCard(props: { projectCode: string }) {
                   <Tag color={job.status === "done" ? (job.failure ? "red" : "green") : "blue"}>
                     {job.status === "done" ? (job.failure ? "失败" : "完成") : job.status === "running" ? "执行中" : "等待领取"}
                   </Tag>
-                  <Typography.Text type="secondary">领取次数 {job.attempt}</Typography.Text>
+                  <Typography.Text type="secondary">执行 {job.attempt}/{job.maxAttempts} 次</Typography.Text>
+                  {job.priority > 0 ? <Tag color="blue">优先级 {job.priority}</Tag> : null}
                   {job.claimedAt ? <Typography.Text type="secondary">领取于 {formatTime(job.claimedAt)}</Typography.Text> : null}
                 </Space>
                 {job.failure ? <Typography.Paragraph type="danger" style={{ marginBottom: 4 }}>{job.failure}</Typography.Paragraph> : null}

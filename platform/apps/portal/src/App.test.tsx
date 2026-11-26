@@ -373,7 +373,9 @@ describe("portal shell", () => {
                   id: "job-1",
                   nodeName: "test-1",
                   status: "done",
-                  attempt: 1,
+                  attempt: 2,
+                  maxAttempts: 2,
+                  priority: 10,
                   failure: "测试容器启动失败",
                   log: "[2026-11-23T08:00:00.000Z] 开始拉取镜像\n[2026-11-23T08:00:05.000Z] 镜像拉取完成\n",
                   createdAt: "2026-11-23T07:59:59.000Z",
@@ -426,7 +428,8 @@ describe("portal shell", () => {
     expect(log).toHaveTextContent("镜像拉取完成");
     const job = screen.getByTestId("platform/test-results/job-job-1");
     expect(job).toHaveTextContent("test-1");
-    expect(job).toHaveTextContent("领取次数 1");
+    expect(job).toHaveTextContent("执行 2/2 次");
+    expect(job).toHaveTextContent("优先级 10");
     expect(job).toHaveTextContent("测试容器启动失败");
     // 再点一次收起。
     fireEvent.click(screen.getByTestId("platform/test-results/jobs-run-1"));

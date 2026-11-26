@@ -271,6 +271,8 @@ alter table test_jobs add column if not exists model_name text not null default 
 alter table test_jobs add column if not exists model_api_key text not null default '';
 alter table test_jobs add column if not exists attempt integer not null default 0;
 alter table test_jobs add column if not exists log text not null default '';
+alter table test_jobs add column if not exists priority integer not null default 0;
+alter table test_jobs add column if not exists max_attempts integer not null default 2;
 
 create table if not exists portal_notifications (
   id uuid primary key,

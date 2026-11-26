@@ -26,6 +26,7 @@ export type SystemConfig = {
   "test.requirePassBeforePublish": boolean;
   "test.stepTimeoutSeconds": number;
   "test.runTimeoutSeconds": number;
+  "test.maxAttempts": number;
 };
 
 export function defaultSystemConfig(input: {
@@ -63,5 +64,6 @@ export function defaultSystemConfig(input: {
     "test.requirePassBeforePublish": true,
     "test.stepTimeoutSeconds": 30,
     "test.runTimeoutSeconds": 900,
+    "test.maxAttempts": 2,
   };
 }

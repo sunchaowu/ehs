@@ -6,6 +6,7 @@ import { openDatabase } from "../src/database.js";
 import { installInitialAdmin } from "../src/install-admin.js";
 import { claimTestJobs } from "../src/node-tests.js";
 import { buildServer } from "../src/server.js";
+import { expireStaleTestJobs } from "../src/test-runs.js";
 import type { TestExecutor } from "../src/test-executor.js";
 import { caseCode, generateAutomaticCases, normalizeUserCase } from "../src/test-cases.js";
 import type { DesignDocument } from "../src/compiler.js";
@@ -527,7 +528,14 @@ describe("online testing", () => {
       cookies: { platform_session: cookie },
     });
     expect(pending.statusCode).toBe(200);
-    expect(pending.json().jobs[0]).toMatchObject({ id: jobId, nodeName: "test-1", status: "pending", attempt: 0 });
+    expect(pending.json().jobs[0]).toMatchObject({
+      id: jobId,
+      nodeName: "test-1",
+      status: "pending",
+      attempt: 0,
+      maxAttempts: 2,
+      priority: 0,
+    });
     expect(pending.json().jobs[0].log).toBe("开始拉取镜像\n镜像拉取完成\n");
 
     // 领取一次，attempt 计 1。
@@ -538,8 +546,22 @@ describe("online testing", () => {
 
     // 超长片段被截断，整条日志有上限。
     expect((await report({ log: "x".repeat(40000) })).statusCode).toBe(200);
-    // 终态回报可携带最后一段日志。
+    // 基础设施失败先重新入队，并写入重试日志。
     expect((await report({ reason: "测试容器启动失败", log: "最后片段\n" })).statusCode).toBe(200);
+    const requeued = await app.inject({
+      method: "GET",
+      url: `/api/projects/${code}/tests/runs/${runId}/jobs`,
+      cookies: { platform_session: cookie },
+    });
+    expect(requeued.json().jobs[0]).toMatchObject({ status: "pending", attempt: 1, failure: "" });
+    expect(requeued.json().jobs[0].log).toContain("重新入队");
+
+    // 第 2/2 次领取后再失败即进入终态。
+    const retrying = await openDatabase(databaseUrl);
+    const reclaimed = await claimTestJobs(retrying, "test-1", 10);
+    await retrying.close();
+    expect(reclaimed.find((item) => item.id === jobId)?.attempt).toBe(2);
+    expect((await report({ reason: "测试容器启动失败", log: "第二次失败\n" })).statusCode).toBe(200);
     // 已结束的任务拒绝任何后续回报。
     expect((await report({ log: "迟到的片段" })).statusCode).toBe(409);
 
@@ -548,8 +570,9 @@ describe("online testing", () => {
       url: `/api/projects/${code}/tests/runs/${runId}/jobs`,
       cookies: { platform_session: cookie },
     });
-    const job = settled.json().jobs[0] as { status: string; attempt: number; failure: string; log: string; finishedAt: string | null };
-    expect(job).toMatchObject({ status: "done", attempt: 1, failure: "测试容器启动失败" });
+    const job = settled.json().jobs[0] as { status: string; attempt: number; maxAttempts: number; failure: string; log: string; finishedAt: string | null };
+    expect(job).toMatchObject({ status: "done", attempt: 2, maxAttempts: 2, failure: "测试容器启动失败" });
+    expect(job.log).toContain("第二次失败");
     expect(job.log).toContain("开始拉取镜像");
     expect(job.log).toContain("最后片段");
     expect(job.log.length).toBeLessThanOrEqual(65536);
@@ -565,5 +588,122 @@ describe("online testing", () => {
       cookies: { platform_session: cookie },
     });
     expect(missing.statusCode).toBe(404);
+  }, 120000);
+
+  it("claims by priority and requeues stale attempts until exhausted", async () => {
+    const databaseUrl = process.env.DATABASE_SYSTEM_URL!;
+    const installed = await installAdmin();
+    app = await buildServer({
+      databaseUrl,
+      imageBuilder: async () => ({ digest }),
+      databaseProvisioner: async () => ({ created: true }),
+    });
+    const cookie = await login(app, installed.password);
+    const code = await createProjectWithDesign(app, cookie, "请假审批");
+    const registered = await app.inject({
+      method: "POST",
+      url: "/api/nodes",
+      cookies: { platform_session: cookie },
+      payload: { name: "test-1", zone: "测试区" },
+    });
+    const token = registered.json().token as string;
+    await app.inject({
+      method: "PUT",
+      url: "/api/nodes/test-1/pool",
+      cookies: { platform_session: cookie },
+      payload: { pool: "test" },
+    });
+
+    const start = async () => {
+      const response = await app!.inject({
+        method: "POST",
+        url: `/api/projects/${code}/tests`,
+        cookies: { platform_session: cookie },
+      });
+      expect(response.statusCode).toBe(202);
+      return response.json().runId as string;
+    };
+    const runA = await start();
+    const runB = await start();
+    const db = await openDatabase(databaseUrl);
+    const jobs = await db.query<{ id: string; run_id: string }>(
+      "select id, run_id from test_jobs where run_id = any($1::uuid[])",
+      [[runA, runB]],
+    );
+    const jobA = jobs.rows.find((row) => row.run_id === runA)!;
+    const jobB = jobs.rows.find((row) => row.run_id === runB)!;
+    // 模拟回放任务：高优先级越过更早入队的普通任务。
+    await db.query("update test_jobs set priority = 10 where id = $1", [jobB.id]);
+
+    // UPDATE ... RETURNING 不保证行顺序，用 limit=1 分两次领取验证真实领取次序。
+    const firstClaim = await claimTestJobs(db, "test-1", 1);
+    expect(firstClaim.map((job) => job.runId)).toEqual([runB]);
+    const secondClaim = await claimTestJobs(db, "test-1", 1);
+    expect(secondClaim.map((job) => job.runId)).toEqual([runA]);
+    await db.close();
+
+    // 超时任务在重试次数内重新入队，并立即可被再次领取。
+    const stale = await openDatabase(databaseUrl);
+    await stale.query(
+      "update test_jobs set claimed_at = now() - interval '1 hour' where run_id = any($1::uuid[])",
+      [[runA]],
+    );
+    const reclaimed = await claimTestJobs(stale, "test-1", 10);
+    expect(reclaimed.find((job) => job.runId === runA)?.attempt).toBe(2);
+    const stillRunning = await stale.query<{ status: string }>("select status from test_runs where id = $1", [runA]);
+    expect(stillRunning.rows[0].status).toBe("running");
+    await stale.close();
+
+    // 高优先级任务用断言失败回报：这是测试结论，不重试，直接结束运行。
+    const reportB = await app.inject({
+      method: "POST",
+      url: `/api/nodes/test-1/tests/${jobB.id}`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: {
+        outcomes: [
+          {
+            caseCode: "case-1",
+            caseName: "新增请假单",
+            stepIndex: 1,
+            method: "white-box",
+            locator: "qing-jia-shen-pi/请假单.create",
+            input: { action: "call", target: "qing-jia-shen-pi/请假单.create" },
+            expected: "返回带 id 的记录",
+            actual: "500",
+            passed: false,
+            reason: "接口报错",
+          },
+        ],
+      },
+    });
+    expect(reportB.statusCode).toBe(200);
+    const verified = await openDatabase(databaseUrl);
+    const jobBRow = await verified.query<{ status: string; attempt: number; log: string }>(
+      "select status, attempt, log from test_jobs where id = $1",
+      [jobB.id],
+    );
+    expect(jobBRow.rows[0]).toMatchObject({ status: "done", attempt: 1 });
+    expect(jobBRow.rows[0].log).not.toContain("重新入队");
+    const runBRow = await verified.query<{ status: string }>("select status from test_runs where id = $1", [runB]);
+    expect(runBRow.rows[0].status).toBe("failed");
+
+    // 同一次超时重试用尽后，任务与运行一起失败，日志说明重试耗尽。
+    await verified.query(
+      "update test_jobs set claimed_at = now() - interval '1 hour' where run_id = $1",
+      [runA],
+    );
+    await expireStaleTestJobs(verified);
+    const jobARow = await verified.query<{ status: string; failure: string; log: string }>(
+      "select status, failure, log from test_jobs where run_id = $1",
+      [runA],
+    );
+    expect(jobARow.rows[0]).toMatchObject({ status: "done", failure: "测试节点未在时限内回报" });
+    expect(jobARow.rows[0].log).toContain("重试次数用尽");
+    const runARow = await verified.query<{ status: string; failure: string }>(
+      "select status, failure from test_runs where id = $1",
+      [runA],
+    );
+    expect(runARow.rows[0]).toMatchObject({ status: "failed", failure: "测试节点未在时限内回报" });
+    await verified.close();
   }, 120000);
 });
