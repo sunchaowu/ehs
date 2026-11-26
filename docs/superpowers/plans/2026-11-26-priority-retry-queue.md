@@ -53,6 +53,10 @@
 - `node-agent.test.mjs` 12/12；门户 `App.test.tsx` 27/27（任务日志用例更新为「执行 2/2 次」「优先级 10」）。
 - 控制面全套在局域网容器内以 `platform_test` 执行：33 个文件、93 个用例全部通过；测试前重建独立库，不触碰正式库 `platform`。
 
+## 部署顺序修复
+
+首次发布后发现：`scripts/deploy.sh` 的「安装初始管理员」步骤在 `control-plane` 镜像重建之前运行，而 `install.ts` 是唯一执行 schema 迁移的入口，导致生产库拿到的是上一次发布的旧代码迁移结果（`priority` / `max_attempts` / `test.maxAttempts` 缺失）。已在安装步骤前加入 `docker compose build control-plane`，保证迁移使用本次代码。
+
 ## 当前边界
 
 - 重试仍回到原任务绑定的节点；若该节点持续不可用，重试会在次数用尽后失败。跨节点转移未实现。
