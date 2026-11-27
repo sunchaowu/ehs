@@ -23,6 +23,7 @@ export type NodeTestJob = {
   modelBaseUrl: string;
   modelName: string;
   modelApiKey: string;
+  attempt: number;
 };
 
 type StoredJobRow = {
@@ -40,6 +41,8 @@ type StoredJobRow = {
   model_api_key: string;
   status: string;
   attempt: number;
+  max_attempts: number;
+  priority: number;
   log: string;
   replayed_from: string | null;
   replayed_from_digest: string | null;
@@ -57,7 +60,7 @@ export async function dispatchProjectTestRun(
   if ("reason" in prepared) {
     return prepared;
   }
-  return enqueueNodeJob(database, project.code, prepared);
+  return enqueueNodeJob(database, project.code, prepared, 0);
 }
 
 export async function dispatchReplayTestRun(
@@ -69,13 +72,15 @@ export async function dispatchReplayTestRun(
   if ("reason" in prepared) {
     return prepared;
   }
-  return enqueueNodeJob(database, project.code, prepared);
+  // 回放是人工触发的针对性重跑，排在新跑的全量任务之前。
+  return enqueueNodeJob(database, project.code, prepared, 10);
 }
 
 async function enqueueNodeJob(
   database: SystemDatabase,
   projectCode: string,
   prepared: TestRunPreparation,
+  priority: number,
 ): Promise<NodeTestDispatch> {
   const config = await database.readConfig();
   const names = poolNames(config["test.nodePool"]);
@@ -95,10 +100,12 @@ async function enqueueNodeJob(
     await failTestRun(database, prepared.runId, "测试节点池没有已注册节点");
     return { reason: "测试节点池没有已注册节点", status: 409 };
   }
+  // 重试次数在入队时快照，之后改配置不影响已排队的任务。
+  const maxAttempts = Math.max(1, Math.floor(Number(config["test.maxAttempts"] ?? 2)));
   await database.query(
     `insert into test_jobs
-     (id, run_id, node_name, project_code, image_digest, database_name, cases, step_timeout_seconds, run_timeout_seconds, model_base_url, model_name, model_api_key, replayed_from, replayed_from_digest, status, created_at)
-     values (gen_random_uuid(), $1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, 'pending', now())`,
+     (id, run_id, node_name, project_code, image_digest, database_name, cases, step_timeout_seconds, run_timeout_seconds, replayed_from, replayed_from_digest, model_base_url, model_name, model_api_key, priority, max_attempts, status, created_at)
+     values (gen_random_uuid(), $1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'pending', now())`,
     [
       prepared.runId,
       node,
@@ -108,11 +115,13 @@ async function enqueueNodeJob(
       JSON.stringify(prepared.cases),
       prepared.stepTimeoutSeconds,
       prepared.runTimeoutSeconds,
+      prepared.replayedFrom,
+      prepared.replayedFromDigest,
       prepared.modelBaseUrl,
       prepared.modelName,
       prepared.modelApiKey,
-      prepared.replayedFrom,
-      prepared.replayedFromDigest,
+      priority,
+      maxAttempts,
     ],
   );
   return { runId: prepared.runId, status: "running", node };
@@ -130,12 +139,12 @@ export async function claimTestJobs(database: SystemDatabase, nodeName: string, 
      where id in (
        select id from test_jobs
        where node_name = $1 and status = 'pending'
-       order by created_at
+       order by priority desc, created_at, id
        limit $2
        for update skip locked
      )
      returning id, run_id, node_name, project_code, image_digest, database_name, cases,
-               step_timeout_seconds, run_timeout_seconds, model_base_url, model_name, model_api_key, status`,
+               step_timeout_seconds, run_timeout_seconds, status, model_base_url, model_name, model_api_key, attempt`,
     [nodeName, limit],
   );
   return claimed.rows.map((row) => ({
@@ -150,24 +159,80 @@ export async function claimTestJobs(database: SystemDatabase, nodeName: string, 
     modelBaseUrl: row.model_base_url,
     modelName: row.model_name,
     modelApiKey: row.model_api_key,
+    attempt: row.attempt,
   }));
 }
 
-const LOG_LIMIT = 20000;
+/** 单次日志片段与整条任务日志的上限，防止失控输出撑爆系统库。 */
+const JOB_LOG_CHUNK_LIMIT = 16_384;
+const JOB_LOG_TOTAL_LIMIT = 65_536;
 
-function normalizeLog(value: unknown): string {
-  if (typeof value !== "string") {
-    return "";
+async function appendJobLog(database: SystemDatabase, jobId: string, chunk: string): Promise<void> {
+  if (!chunk) {
+    return;
   }
-  return value.length > LOG_LIMIT ? value.slice(value.length - LOG_LIMIT) : value;
+  await database.query(
+    `update test_jobs set log = right(log || $2, ${JOB_LOG_TOTAL_LIMIT}) where id = $1`,
+    [jobId, chunk.slice(0, JOB_LOG_CHUNK_LIMIT)],
+  );
 }
 
-function joinedLog(existing: string, addition: string): string {
-  if (!addition) {
-    return existing;
+export type NodeTestJobView = {
+  id: string;
+  nodeName: string;
+  status: string;
+  attempt: number;
+  maxAttempts: number;
+  priority: number;
+  failure: string;
+  log: string;
+  createdAt: string;
+  claimedAt: string | null;
+  finishedAt: string | null;
+};
+
+/** 门户排障视图：一次运行对应的节点任务、领取次数与实时日志。 */
+export async function listRunJobs(
+  database: SystemDatabase,
+  projectId: string,
+  runId: string,
+): Promise<{ jobs: NodeTestJobView[] } | { reason: string; status: number }> {
+  const run = await database.query<{ project_id: string }>("select project_id from test_runs where id = $1", [runId]);
+  if (!run.rows[0] || run.rows[0].project_id !== projectId) {
+    return { reason: "没有这条测试记录", status: 404 };
   }
-  const text = existing ? `${existing}\n${addition}` : addition;
-  return text.length > LOG_LIMIT ? text.slice(text.length - LOG_LIMIT) : text;
+  const jobs = await database.query<{
+    id: string;
+    node_name: string;
+    status: string;
+    attempt: number;
+    max_attempts: number;
+    priority: number;
+    failure: string;
+    log: string;
+    created_at: Date;
+    claimed_at: Date | null;
+    finished_at: Date | null;
+  }>(
+    `select id, node_name, status, attempt, max_attempts, priority, failure, log, created_at, claimed_at, finished_at
+     from test_jobs where run_id = $1 order by created_at`,
+    [runId],
+  );
+  return {
+    jobs: jobs.rows.map((row) => ({
+      id: row.id,
+      nodeName: row.node_name,
+      status: row.status,
+      attempt: row.attempt,
+      maxAttempts: row.max_attempts,
+      priority: row.priority,
+      failure: row.failure,
+      log: row.log,
+      createdAt: row.created_at.toISOString(),
+      claimedAt: row.claimed_at ? row.claimed_at.toISOString() : null,
+      finishedAt: row.finished_at ? row.finished_at.toISOString() : null,
+    })),
+  };
 }
 
 export async function acceptTestJobReport(
@@ -191,10 +256,32 @@ export async function acceptTestJobReport(
   }
   const failure = typeof report.reason === "string" ? report.reason.trim() : "";
   const outcomes = normalizeOutcomes(report.outcomes);
-  await database.query(
-    "update test_jobs set status = 'done', finished_at = now(), failure = $2, log = $3 where id = $1",
-    [job.id, failure, joinedLog(job.log, normalizeLog(report.log))],
-  );
+  const logChunk = typeof report.log === "string" ? report.log : "";
+  // 只带日志的回报是执行中的实时片段：追加日志、不改任务状态。
+  if (!failure && !outcomes && logChunk) {
+    await appendJobLog(database, job.id, logChunk);
+    return { accepted: true };
+  }
+  // 任务被重新入队后，上一次尝试的迟到终态回报不再生效。
+  if (job.status !== "running") {
+    return { reason: "测试任务尚未被领取", status: 409 };
+  }
+  await appendJobLog(database, job.id, logChunk);
+  // 基础设施失败（镜像、容器、执行入口、stderr 等）自动重试；断言失败是测试结论，不重试。
+  if (failure && job.attempt < job.max_attempts) {
+    await database.query(
+      `update test_jobs set status = 'pending', claimed_at = null, failure = '', log = right(log || $2, ${JOB_LOG_TOTAL_LIMIT}) where id = $1`,
+      [
+        job.id,
+        `[${new Date().toISOString()}] 第 ${job.attempt}/${job.max_attempts} 次执行失败，已按优先级重新入队：${failure}\n`,
+      ],
+    );
+    return { accepted: true };
+  }
+  await database.query("update test_jobs set status = 'done', finished_at = now(), failure = $2 where id = $1", [
+    job.id,
+    failure,
+  ]);
   const prepared = { runId: job.run_id, digest: job.image_digest, cases: job.cases };
   if (failure) {
     await failTestRun(database, job.run_id, failure);
@@ -212,92 +299,6 @@ export async function acceptTestJobReport(
     job.replayed_from_digest,
   );
   return { accepted: true };
-}
-
-/** 节点在执行过程中追加日志片段；任务已结束后不再接受。 */
-export async function appendTestJobLog(
-  database: SystemDatabase,
-  nodeName: string,
-  authorization: string,
-  jobId: string,
-  log: unknown,
-): Promise<{ accepted: true } | { reason: string; status: number }> {
-  const node = await authenticateNode(database, nodeName, authorization);
-  if (!node) {
-    return { reason: "节点凭证无效", status: 401 };
-  }
-  const found = await database.query<StoredJobRow>("select id, node_name, status, log from test_jobs where id = $1", [jobId]);
-  const job = found.rows[0];
-  if (!job || job.node_name !== nodeName) {
-    return { reason: "测试任务不存在", status: 404 };
-  }
-  if (job.status === "done") {
-    return { reason: "测试任务已结束", status: 409 };
-  }
-  const addition = normalizeLog(log);
-  if (!addition) {
-    return { accepted: true };
-  }
-  await database.query("update test_jobs set log = $2 where id = $1", [job.id, joinedLog(job.log, addition)]);
-  return { accepted: true };
-}
-
-export type TestJobView = {
-  id: string;
-  runId: string;
-  nodeName: string;
-  status: string;
-  attempt: number;
-  log: string;
-  failure: string;
-  createdAt: Date;
-  claimedAt: Date | null;
-  finishedAt: Date | null;
-};
-
-/** 项目成员读取一次运行下的节点任务，用于排障与日志查看。 */
-export async function readTestRunJobs(
-  database: SystemDatabase,
-  projectId: string,
-  runId: string,
-): Promise<{ jobs: TestJobView[] } | { reason: string; status: number }> {
-  const found = await database.query<{ id: string }>(
-    "select id from test_runs where id = $1 and project_id = $2",
-    [runId, projectId],
-  );
-  if (!found.rows[0]) {
-    return { reason: "没有这条测试记录", status: 404 };
-  }
-  const jobs = await database.query<{
-    id: string;
-    run_id: string;
-    node_name: string;
-    status: string;
-    attempt: number;
-    log: string;
-    failure: string;
-    created_at: Date;
-    claimed_at: Date | null;
-    finished_at: Date | null;
-  }>(
-    `select id, run_id, node_name, status, attempt, log, failure, created_at, claimed_at, finished_at
-     from test_jobs where run_id = $1 order by created_at`,
-    [runId],
-  );
-  return {
-    jobs: jobs.rows.map((row) => ({
-      id: row.id,
-      runId: row.run_id,
-      nodeName: row.node_name,
-      status: row.status,
-      attempt: row.attempt,
-      log: row.log,
-      failure: row.failure,
-      createdAt: row.created_at,
-      claimedAt: row.claimed_at,
-      finishedAt: row.finished_at,
-    })),
-  };
 }
 
 function normalizeOutcomes(value: unknown): TestStepOutcome[] | null {

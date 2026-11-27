@@ -141,6 +141,11 @@ from=$SECONDS
 printf '==> 拉起 system-db\n' >&2
 "${compose[@]}" up -d --build --wait system-db
 printf '<== system-db 完成（%d 秒）\n' "$((SECONDS - from))" >&2
+# 安装脚本负责执行 schema 迁移，必须先构建最新控制面镜像，否则会拿上一次发布的旧代码迁移。
+from=$SECONDS
+printf '==> 构建控制面镜像\n' >&2
+"${compose[@]}" build control-plane
+printf '<== 控制面镜像完成（%d 秒）\n' >&2
 from=$SECONDS
 printf '==> 安装初始管理员\n' >&2
 "${compose[@]}" run --rm -T control-plane pnpm exec tsx apps/control-plane/src/install.ts </dev/null

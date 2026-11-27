@@ -319,22 +319,6 @@ async function reportTestJob(jobId, body, requestFn = request) {
   throw lastError;
 }
 
-/** 执行过程中追加日志片段；回报失败不影响测试本身。 */
-async function reportTestLog(jobId, log, requestFn = request) {
-  if (!log) {
-    return;
-  }
-  try {
-    await requestFn("/api/nodes/" + nodeName() + "/tests/" + jobId + "/log", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ log: String(log) }),
-    });
-  } catch {
-    // 日志回报失败不影响测试执行。
-  }
-}
-
 function formatLog(label, result) {
   const out = String(result && result.stdout ? result.stdout : "").trim();
   const err = String(result && result.stderr ? result.stderr : "").trim();
@@ -361,22 +345,28 @@ export async function runTestJob(job, options = {}) {
   const runnerPath = directory + "/test-runner.mjs";
   // Midscene HTML 报告与截图留在测试节点，不进入正式区。
   const reportDir = directory + "/test-reports/" + String(job.runId ?? "run").replace(/[^a-z0-9]/gi, "") + "-" + job.id.replace(/[^a-z0-9]/gi, "");
-  const logLines = [];
-  async function note(label, result) {
-    const text = formatLog(label, result);
-    logLines.push(text);
-    await reportTestLog(job.id, text, requestFn);
-  }
-  function finalLog() {
-    return logLines.join("\n");
-  }
+  // 实时日志片段：随终态回报走同一入口，失败不重试也不影响测试执行。
+  const note = async function (label, result) {
+    const message = result === undefined ? label : formatLog(label, result);
+    try {
+      await requestFn("/api/nodes/" + nodeName() + "/tests/" + job.id, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ log: "[" + new Date().toISOString() + "] " + message + "\n" }),
+      });
+    } catch {
+      // 日志回报失败只损失可观测性，不损失测试结果。
+    }
+  };
   try {
+    await note("开始测试任务，拉取候选镜像 " + job.imageDigest);
     const pulled = await dockerFn(["pull", job.imageDigest]);
     await note("拉取镜像", pulled);
     if (pulled.code !== 0) {
-      await reportTestJob(job.id, { reason: (pulled.stderr || pulled.stdout || "镜像拉取失败").trim(), log: finalLog() }, requestFn);
+      await reportTestJob(job.id, { reason: (pulled.stderr || pulled.stdout || "镜像拉取失败").trim() }, requestFn);
       return;
     }
+    await note("候选镜像拉取完成");
     await dockerFn(["rm", "-f", containerName]);
     const args = ["run", "-d", "--name", containerName, "-e", "DATABASE_NAME=" + job.databaseName, "-e", "runtime.mode=test"];
     const url = databaseUrl(job.databaseName);
@@ -387,15 +377,17 @@ export async function runTestJob(job, options = {}) {
     const started = await dockerFn(args);
     await note("启动测试容器", started);
     if (started.code !== 0) {
-      await reportTestJob(job.id, { reason: (started.stderr || started.stdout || "测试容器启动失败").trim(), log: finalLog() }, requestFn);
+      await reportTestJob(job.id, { reason: (started.stderr || started.stdout || "测试容器启动失败").trim() }, requestFn);
       return;
     }
+    await note("测试容器已启动 " + containerName);
     const health = await containerHealth(containerName, dockerFn);
     await note("容器健康检查", { stdout: JSON.stringify(health ?? {}), stderr: "" });
     if (!health) {
-      await reportTestJob(job.id, { reason: "测试容器健康检查未返回结果", log: finalLog() }, requestFn);
+      await reportTestJob(job.id, { reason: "测试容器健康检查未返回结果" }, requestFn);
       return;
     }
+    await note("测试容器健康检查通过");
     writeFileSync(
       payloadPath,
       JSON.stringify({
@@ -412,20 +404,21 @@ export async function runTestJob(job, options = {}) {
     const copiedRunner = await dockerFn(["cp", runnerPath, containerName + ":/tmp/platform-test-runner.mjs"]);
     await note("复制测试入口", copiedRunner);
     if (copiedRunner.code !== 0) {
-      await reportTestJob(job.id, { reason: (copiedRunner.stderr || "无法复制白盒测试入口").trim(), log: finalLog() }, requestFn);
+      await reportTestJob(job.id, { reason: (copiedRunner.stderr || "无法复制白盒测试入口").trim() }, requestFn);
       return;
     }
     const copiedPayload = await dockerFn(["cp", payloadPath, containerName + ":/tmp/platform-test-payload.json"]);
     await note("复制测试用例", copiedPayload);
     if (copiedPayload.code !== 0) {
-      await reportTestJob(job.id, { reason: (copiedPayload.stderr || "无法复制测试用例").trim(), log: finalLog() }, requestFn);
+      await reportTestJob(job.id, { reason: (copiedPayload.stderr || "无法复制测试用例").trim() }, requestFn);
       return;
     }
+    await note("测试入口与用例载荷已注入，开始执行");
     const executed = await dockerFn(
       ["exec", "-e", "PLATFORM_TEST_PAYLOAD_FILE=/tmp/platform-test-payload.json", containerName, "node", "/tmp/platform-test-runner.mjs"],
       { timeoutMs: Math.max(60000, Number(job.runTimeoutSeconds ?? 900) * 1000) },
     );
-    await note("执行测试", executed);
+    await note("白盒入口执行结束，退出码 " + executed.code, executed);
     if ((job.cases ?? []).some(function (testCase) { return testCase.method === "black-box"; })) {
       // 把容器里的 Midscene HTML 报告与步骤截图拷回测试节点留存。
       try {
@@ -441,14 +434,14 @@ export async function runTestJob(job, options = {}) {
     }
     const parsed = lastJsonLine(executed.stdout);
     if (!parsed) {
-      await reportTestJob(job.id, { reason: (executed.stderr || executed.stdout || "白盒测试入口没有返回结果").trim(), log: finalLog() }, requestFn);
+      await reportTestJob(job.id, { reason: (executed.stderr || executed.stdout || "白盒测试入口没有返回结果").trim() }, requestFn);
       return;
     }
     if (parsed.failure) {
-      await reportTestJob(job.id, { reason: String(parsed.failure), log: finalLog() }, requestFn);
+      await reportTestJob(job.id, { reason: String(parsed.failure) }, requestFn);
       return;
     }
-    await reportTestJob(job.id, { outcomes: Array.isArray(parsed.outcomes) ? parsed.outcomes : [], log: finalLog() }, requestFn);
+    await reportTestJob(job.id, { outcomes: Array.isArray(parsed.outcomes) ? parsed.outcomes : [] }, requestFn);
   } finally {
     await dockerFn(["rm", "-f", containerName]);
     try {

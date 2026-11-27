@@ -271,8 +271,11 @@ alter table test_jobs add column if not exists model_base_url text not null defa
 alter table test_jobs add column if not exists model_name text not null default '';
 alter table test_jobs add column if not exists model_api_key text not null default '';
 -- 调度可观测性：attempt 记录节点领取次数，log 保存节点回报的执行日志片段。
+-- priority 与 max_attempts 支撑调度侧的优先级排序与重试上限。
 alter table test_jobs add column if not exists attempt integer not null default 0;
 alter table test_jobs add column if not exists log text not null default '';
+alter table test_jobs add column if not exists priority integer not null default 0;
+alter table test_jobs add column if not exists max_attempts integer not null default 2;
 
 create table if not exists portal_notifications (
   id uuid primary key,
